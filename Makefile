@@ -103,10 +103,25 @@ CXXFLAGS := -std=c++11 -O2 -Wall $(PLATFORM_DEFS) \
 CFLAGS := -O2 -Wall $(PLATFORM_DEFS) \
 	-I$(BLFWK_DIR)/src -I$(BLFWK_INC) -Ilib/miniz -Ilib/cJSON
 
+# Patch marker file
+PATCH_MARKER := $(BLFWK_SRC)/.patched
+
 # Build targets
-.PHONY: all clean tools
+.PHONY: all clean tools patch-lib
 
 all: $(TARGET)$(TARGET_EXT)
+
+# Apply patches to library (macOS only - skip IOHIDManagerOpen which fails on newer macOS)
+patch-lib: $(PATCH_MARKER)
+
+$(PATCH_MARKER):
+ifeq ($(UNAME_S),Darwin)
+	@if ! grep -q "skip IOHIDManagerOpen" $(BLFWK_SRC)/hid-mac.c 2>/dev/null; then \
+		echo "Applying macOS IOKit patch..."; \
+		patch -p1 -d $(BLFWK_DIR) < patches/hid-mac-iokit-fix.patch; \
+	fi
+endif
+	@touch $@
 
 # Build the unified tool
 $(TARGET)$(TARGET_EXT): $(OBJS) $(BLFWK_OBJS) $(LIB_MINIZ) $(LIB_CJSON)
@@ -128,7 +143,8 @@ $(SRC_DIR)/%.o: $(SRC_DIR)/%.cpp
 $(BLFWK_SRC)/%.o: $(BLFWK_SRC)/%.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
-$(BLFWK_SRC)/%.o: $(BLFWK_SRC)/%.c
+# Ensure patches are applied before compiling library .c files
+$(BLFWK_SRC)/%.o: $(BLFWK_SRC)/%.c | $(PATCH_MARKER)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(CRC_SRC)/%.o: $(CRC_SRC)/%.cpp
@@ -150,6 +166,7 @@ clean:
 	rm -f $(TARGET) $(TARGET).exe blhost sdphost blhost.exe sdphost.exe
 	rm -f $(OBJS) $(BLFWK_OBJS) $(LIB_MINIZ) $(LIB_CJSON)
 	rm -f $(BLFWK_DIR)/sdphost.o $(BLFWK_DIR)/proj/blhost/src/blhost.o
+	rm -f $(PATCH_MARKER)
 
 # Print detected platform (for debugging)
 info:
