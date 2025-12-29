@@ -1,0 +1,3 @@
+[submodule "lib/nxp_blhost_sdphost"]
+	path = lib/nxp_blhost_sdphost
+	url = https://github.com/apexrtos/nxp_blhost_sdphost.git

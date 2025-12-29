@@ -1,0 +1,27 @@
+# Build artifacts
+*.o
+*.obj
+*.exe
+nt-flash
+blhost
+sdphost
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Temporary files
+/tmp/
+*.tmp
+*.zip
+
+# BMAD output (not for version control)
+_bmad-output/
+
+# Debug files
+*.dSYM/
+*.log
