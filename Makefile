@@ -121,6 +121,12 @@ ifeq ($(UNAME_S),Darwin)
 		cd $(BLFWK_DIR) && git apply --ignore-whitespace --ignore-space-change ../../patches/hid-mac-iokit-fix.patch; \
 	fi
 endif
+ifneq (,$(findstring MINGW,$(UNAME_S))$(findstring MSYS,$(UNAME_S)))
+	@if ! grep -A2 "ifdef WIN32" $(BLFWK_SRC)/Command.cpp 2>/dev/null | grep -q "string.h"; then \
+		echo "Applying Windows string.h patch..."; \
+		cd $(BLFWK_DIR) && git apply --ignore-whitespace --ignore-space-change ../../patches/windows-string-include.patch || true; \
+	fi
+endif
 	@touch $@
 
 # Build the unified tool
