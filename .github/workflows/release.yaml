@@ -1,0 +1,215 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      use_latest_tag:
+        description: 'Use latest tag for release'
+        required: true
+        default: 'true'
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            name: macos
+            artifact: nt-flash
+            archive_cmd: zip -r
+            archive_ext: zip
+          - os: ubuntu-latest
+            name: linux
+            artifact: nt-flash
+            archive_cmd: tar -czvf
+            archive_ext: tar.gz
+          - os: windows-latest
+            name: windows
+            artifact: nt-flash.exe
+            archive_cmd: zip -r
+            archive_ext: zip
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Determine version
+        id: get_version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+            if [ -z "$LATEST_TAG" ]; then
+              echo "Error: No tags found"
+              exit 1
+            fi
+            echo "version=$LATEST_TAG" >> $GITHUB_OUTPUT
+            git checkout "$LATEST_TAG"
+          else
+            echo "version=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libudev-dev
+
+      - name: Install dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          # Xcode command line tools should be available
+
+      - name: Install dependencies (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-make
+            zip
+
+      - name: Build (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          make clean || true
+          make
+
+      - name: Build (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: msys2 {0}
+        run: |
+          mingw32-make clean || true
+          mingw32-make
+
+      - name: Prepare release package
+        shell: bash
+        run: |
+          VERSION="${{ steps.get_version.outputs.version }}"
+          ARCHIVE_NAME="nt-flash-${VERSION}-${{ matrix.name }}"
+
+          mkdir -p "release/${ARCHIVE_NAME}"
+          cp "${{ matrix.artifact }}" "release/${ARCHIVE_NAME}/"
+          cp README.md "release/${ARCHIVE_NAME}/"
+
+          cd release
+          if [ "${{ matrix.archive_ext }}" = "tar.gz" ]; then
+            tar -czvf "${ARCHIVE_NAME}.${{ matrix.archive_ext }}" "${ARCHIVE_NAME}"
+          else
+            zip -r "${ARCHIVE_NAME}.${{ matrix.archive_ext }}" "${ARCHIVE_NAME}"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nt-flash-${{ matrix.name }}
+          path: release/*.${{ matrix.archive_ext }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine version
+        id: get_version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+            echo "version=$LATEST_TAG" >> $GITHUB_OUTPUT
+          else
+            echo "version=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: find artifacts -type f
+
+      - name: Generate Release Notes
+        run: |
+          VERSION="${{ steps.get_version.outputs.version }}"
+          cat > release_notes.md << 'EOF'
+          # NT Flash Tool
+
+          Command-line tool for flashing disting NT firmware.
+
+          ## Installation
+
+          1. Download the archive for your platform
+          2. Extract and run `nt-flash` (or `nt-flash.exe` on Windows)
+
+          ### macOS
+          You may need to allow the app in System Preferences > Security & Privacy.
+
+          ### Linux
+          You may need to set up udev rules for USB access:
+          ```bash
+          sudo tee /etc/udev/rules.d/99-disting.rules << 'RULES'
+          SUBSYSTEM=="usb", ATTR{idVendor}=="1fc9", ATTR{idProduct}=="0135", MODE="0666"
+          SUBSYSTEM=="usb", ATTR{idVendor}=="15a2", ATTR{idProduct}=="0073", MODE="0666"
+          RULES
+          sudo udevadm control --reload-rules
+          ```
+
+          ### Windows
+          Install the WinUSB driver using [Zadig](https://zadig.akeo.ie/).
+
+          ## Usage
+
+          ```bash
+          # Put disting NT in bootloader mode first (Menu > Misc > Enter bootloader mode...)
+
+          # Flash latest firmware
+          nt-flash --latest
+
+          # Flash specific version
+          nt-flash --version 1.12.0
+
+          # Flash local file
+          nt-flash /path/to/firmware.zip
+          ```
+
+          EOF
+
+          echo "## Changes in $VERSION" >> release_notes.md
+          echo "" >> release_notes.md
+          PREV_TAG=$(git describe --tags --abbrev=0 "$VERSION^" 2>/dev/null || echo "")
+          if [ -n "$PREV_TAG" ]; then
+            git log --pretty=format:"- %s" "$PREV_TAG".."$VERSION" >> release_notes.md
+          else
+            git log --pretty=format:"- %s" -10 >> release_notes.md
+          fi
+          echo "" >> release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.get_version.outputs.version }}
+          body_path: release_notes.md
+          files: |
+            artifacts/**/*.zip
+            artifacts/**/*.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
