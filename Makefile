@@ -146,10 +146,10 @@ sdphost: $(BLFWK_OBJS) $(BLFWK_DIR)/sdphost.o
 $(SRC_DIR)/%.o: $(SRC_DIR)/%.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
-$(BLFWK_SRC)/%.o: $(BLFWK_SRC)/%.cpp
+# Ensure patches are applied before compiling library files
+$(BLFWK_SRC)/%.o: $(BLFWK_SRC)/%.cpp | $(PATCH_MARKER)
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
-# Ensure patches are applied before compiling library .c files
 $(BLFWK_SRC)/%.o: $(BLFWK_SRC)/%.c | $(PATCH_MARKER)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
