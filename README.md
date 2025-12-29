@@ -29,8 +29,8 @@ sudo apt-get install libudev-dev
 
 ```bash
 # Clone with submodules
-git clone --recursive https://github.com/yourusername/nt-flash-tool.git
-cd nt-flash-tool
+git clone --recursive https://github.com/thorinside/nt-flash.git
+cd nt-flash
 
 # Build
 make
