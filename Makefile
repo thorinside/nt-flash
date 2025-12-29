@@ -81,8 +81,9 @@ endif
 ifeq ($(findstring MINGW,$(UNAME_S)),MINGW)
     CXX := g++
     CC := gcc
+    PLATFORM_DEFS := -DWIN32 -DBOOTLOADER_HOST -D_WIN32_WINNT=0x0601
     # -include cstring ensures strcmp/memset etc. are available in all C++ files
-    PLATFORM_DEFS := -DWIN32 -DBOOTLOADER_HOST -D_WIN32_WINNT=0x0601 -include cstring
+    PLATFORM_CXX_EXTRA := -include cstring
     PLATFORM_LIBS := -lsetupapi -lhid -lws2_32
     BLFWK_OBJS += $(BLFWK_SRC)/hid-windows.o
     TARGET_EXT := .exe
@@ -90,8 +91,9 @@ endif
 ifeq ($(findstring MSYS,$(UNAME_S)),MSYS)
     CXX := g++
     CC := gcc
+    PLATFORM_DEFS := -DWIN32 -DBOOTLOADER_HOST -D_WIN32_WINNT=0x0601
     # -include cstring ensures strcmp/memset etc. are available in all C++ files
-    PLATFORM_DEFS := -DWIN32 -DBOOTLOADER_HOST -D_WIN32_WINNT=0x0601 -include cstring
+    PLATFORM_CXX_EXTRA := -include cstring
     PLATFORM_LIBS := -lsetupapi -lhid -lws2_32
     BLFWK_OBJS += $(BLFWK_SRC)/hid-windows.o
     TARGET_EXT := .exe
@@ -99,7 +101,7 @@ endif
 
 # Compiler flags
 # Note: -I$(BLFWK_DIR)/src allows includes like "blfwk/Logging.h"
-CXXFLAGS := -std=c++11 -O2 -Wall $(PLATFORM_DEFS) \
+CXXFLAGS := -std=c++11 -O2 -Wall $(PLATFORM_DEFS) $(PLATFORM_CXX_EXTRA) \
 	-I$(BLFWK_DIR)/src -I$(BLFWK_INC) -I$(INC_DIR) -Ilib/miniz -Ilib/cJSON -Iinclude
 
 CFLAGS := -O2 -Wall $(PLATFORM_DEFS) \
