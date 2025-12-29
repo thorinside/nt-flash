@@ -81,7 +81,8 @@ endif
 ifeq ($(findstring MINGW,$(UNAME_S)),MINGW)
     CXX := g++
     CC := gcc
-    PLATFORM_DEFS := -DWIN32 -DBOOTLOADER_HOST -D_WIN32_WINNT=0x0601
+    # -include cstring ensures strcmp/memset etc. are available in all C++ files
+    PLATFORM_DEFS := -DWIN32 -DBOOTLOADER_HOST -D_WIN32_WINNT=0x0601 -include cstring
     PLATFORM_LIBS := -lsetupapi -lhid -lws2_32
     BLFWK_OBJS += $(BLFWK_SRC)/hid-windows.o
     TARGET_EXT := .exe
@@ -89,7 +90,8 @@ endif
 ifeq ($(findstring MSYS,$(UNAME_S)),MSYS)
     CXX := g++
     CC := gcc
-    PLATFORM_DEFS := -DWIN32 -DBOOTLOADER_HOST -D_WIN32_WINNT=0x0601
+    # -include cstring ensures strcmp/memset etc. are available in all C++ files
+    PLATFORM_DEFS := -DWIN32 -DBOOTLOADER_HOST -D_WIN32_WINNT=0x0601 -include cstring
     PLATFORM_LIBS := -lsetupapi -lhid -lws2_32
     BLFWK_OBJS += $(BLFWK_SRC)/hid-windows.o
     TARGET_EXT := .exe
@@ -119,12 +121,6 @@ ifeq ($(UNAME_S),Darwin)
 	@if ! grep -q "skip IOHIDManagerOpen" $(BLFWK_SRC)/hid-mac.c 2>/dev/null; then \
 		echo "Applying macOS IOKit patch..."; \
 		cd $(BLFWK_DIR) && git apply --ignore-whitespace --ignore-space-change ../../patches/hid-mac-iokit-fix.patch; \
-	fi
-endif
-ifneq (,$(findstring MINGW,$(UNAME_S))$(findstring MSYS,$(UNAME_S)))
-	@if ! grep -q "include.*cstring" $(BLFWK_SRC)/Command.cpp 2>/dev/null; then \
-		echo "Applying Windows string.h fix..."; \
-		sed -i '1s/^/#include <cstring>\n/' $(BLFWK_SRC)/Command.cpp; \
 	fi
 endif
 	@touch $@
