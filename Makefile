@@ -118,7 +118,7 @@ $(PATCH_MARKER):
 ifeq ($(UNAME_S),Darwin)
 	@if ! grep -q "skip IOHIDManagerOpen" $(BLFWK_SRC)/hid-mac.c 2>/dev/null; then \
 		echo "Applying macOS IOKit patch..."; \
-		patch -p1 -d $(BLFWK_DIR) < patches/hid-mac-iokit-fix.patch; \
+		cd $(BLFWK_DIR) && git apply --ignore-whitespace --ignore-space-change ../../patches/hid-mac-iokit-fix.patch; \
 	fi
 endif
 	@touch $@
