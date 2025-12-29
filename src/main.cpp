@@ -81,12 +81,14 @@ const char* FIRMWARE_BASE_URL = "https://www.expert-sleepers.co.uk/downloads/fir
 
 static bool g_verbose = false;
 static bool g_dryRun = false;
+static bool g_machineOutput = false;
 
 //------------------------------------------------------------------------------
 // Logging
 //------------------------------------------------------------------------------
 
 void logInfo(const char* fmt, ...) {
+    if (g_machineOutput) return;  // Suppress in machine mode
     va_list args;
     va_start(args, fmt);
     vprintf(fmt, args);
@@ -96,7 +98,7 @@ void logInfo(const char* fmt, ...) {
 }
 
 void logVerbose(const char* fmt, ...) {
-    if (!g_verbose) return;
+    if (!g_verbose || g_machineOutput) return;  // Suppress in machine mode
     va_list args;
     va_start(args, fmt);
     printf("  ");
@@ -109,11 +111,35 @@ void logVerbose(const char* fmt, ...) {
 void logError(const char* fmt, ...) {
     va_list args;
     va_start(args, fmt);
-    fprintf(stderr, "ERROR: ");
-    vfprintf(stderr, fmt, args);
+    if (g_machineOutput) {
+        printf("ERROR:");
+        vprintf(fmt, args);
+        printf("\n");
+        fflush(stdout);
+    } else {
+        fprintf(stderr, "ERROR: ");
+        vfprintf(stderr, fmt, args);
+        fprintf(stderr, "\n");
+        fflush(stderr);
+    }
     va_end(args);
-    fprintf(stderr, "\n");
-    fflush(stderr);
+}
+
+//------------------------------------------------------------------------------
+// Machine-readable output (for --machine flag)
+// Format: TYPE:STAGE:PERCENT:MESSAGE
+//------------------------------------------------------------------------------
+
+void machineStatus(const char* stage, int percent, const char* message) {
+    if (!g_machineOutput) return;
+    printf("STATUS:%s:%d:%s\n", stage, percent, message);
+    fflush(stdout);
+}
+
+void machineProgress(const char* stage, int percent, const char* message) {
+    if (!g_machineOutput) return;
+    printf("PROGRESS:%s:%d:%s\n", stage, percent, message);
+    fflush(stdout);
 }
 
 //------------------------------------------------------------------------------
@@ -272,6 +298,7 @@ FirmwarePackage* loadFirmwarePackage(const char* zipPath) {
     FirmwarePackage* pkg = new FirmwarePackage();
 
     logInfo("Loading firmware package: %s", zipPath);
+    machineStatus("LOAD", 0, "Loading firmware package");
 
     std::vector<uint8_t> zipData;
     if (!loadFile(zipPath, zipData)) {
@@ -329,6 +356,7 @@ FirmwarePackage* loadFirmwarePackage(const char* zipPath) {
 // Download a file using system curl
 bool downloadFile(const char* url, const char* destPath) {
     logInfo("Downloading: %s", url);
+    machineStatus("DOWNLOAD", 0, "Downloading firmware");
 
     char cmd[2048];
 #ifdef WIN32
@@ -351,11 +379,19 @@ bool downloadFile(const char* url, const char* destPath) {
 // Progress Display
 //------------------------------------------------------------------------------
 
+static const char* g_currentStage = "WRITE";
+
 static void displayProgress(int percentage, int segmentIndex, int segmentCount) {
-    printf("\r  Progress: (%d/%d) %d%%", segmentIndex, segmentCount, percentage);
-    fflush(stdout);
-    if (percentage >= 100) {
-        printf(" Done!\n");
+    if (g_machineOutput) {
+        char message[128];
+        snprintf(message, sizeof(message), "Segment %d/%d", segmentIndex, segmentCount);
+        machineProgress(g_currentStage, percentage, message);
+    } else {
+        printf("\r  Progress: (%d/%d) %d%%", segmentIndex, segmentCount, percentage);
+        fflush(stdout);
+        if (percentage >= 100) {
+            printf(" Done!\n");
+        }
     }
 }
 
@@ -711,17 +747,21 @@ bool flashFirmware(FirmwarePackage* pkg, bool skipSdp = false) {
     }
 
     logInfo("=== Starting disting NT flash ===");
+    machineStatus("START", 0, "Starting disting NT flash");
 
     // Phase 1: SDP - Load flashloader (skip if already in flashloader mode)
     if (!skipSdp) {
         SDPOperations sdp;
 
         logInfo("[1/7] Connecting to SDP bootloader...");
+        machineStatus("SDP_CONNECT", 5, "Connecting to SDP bootloader");
         if (!sdp.connect()) {
             // Check if device is already in flashloader mode
             BootloaderOperations blCheck;
+            machineStatus("BL_CHECK", 10, "Checking for flashloader mode");
             if (blCheck.connect()) {
                 logInfo("Device already in flashloader mode, skipping SDP phase...");
+                machineStatus("BL_FOUND", 15, "Device already in flashloader mode");
                 blCheck.close();
                 skipSdp = true;
             } else {
@@ -734,11 +774,14 @@ bool flashFirmware(FirmwarePackage* pkg, bool skipSdp = false) {
 
         if (!skipSdp) {
             logInfo("[2/7] Uploading flashloader to RAM...");
+            machineStatus("SDP_UPLOAD", 15, "Uploading flashloader to RAM");
+            g_currentStage = "SDP_UPLOAD";
             if (!sdp.writeFile(FLASHLOADER_ADDR, pkg->flashloaderPath)) {
                 return false;
             }
 
             logInfo("[3/7] Starting flashloader...");
+            machineStatus("SDP_JUMP", 25, "Starting flashloader");
             if (!sdp.jumpAddress(FLASHLOADER_ADDR)) {
                 return false;
             }
@@ -747,6 +790,7 @@ bool flashFirmware(FirmwarePackage* pkg, bool skipSdp = false) {
 
             // Wait for device to re-enumerate (give it extra time on macOS)
             logInfo("[4/7] Waiting for flashloader to start...");
+            machineStatus("WAIT_ENUM", 30, "Waiting for flashloader to start");
 #ifdef WIN32
             Sleep(3000);
 #else
@@ -763,11 +807,13 @@ bool flashFirmware(FirmwarePackage* pkg, bool skipSdp = false) {
     BootloaderOperations bl;
 
     logInfo("[5/7] Connecting to flashloader...");
+    machineStatus("BL_CONNECT", 40, "Connecting to flashloader");
     if (!bl.connect()) {
         return false;
     }
 
     logInfo("[6/7] Configuring flash and erasing...");
+    machineStatus("CONFIGURE", 50, "Configuring flash memory");
 
     // Configure FlexSPI NOR
     logVerbose("Configuring FlexSPI NOR...");
@@ -782,12 +828,14 @@ bool flashFirmware(FirmwarePackage* pkg, bool skipSdp = false) {
     // The FCB is at 0x60000000, firmware starts at 0x60001000 (0x1000 offset)
     uint32_t eraseSize = pkg->firmware.size() + 0x1000;  // Matches official: firmware + FCB area
     logVerbose("Erasing flash region 0x%08X, size %u bytes...", FLASH_BASE, eraseSize);
+    machineStatus("ERASE", 55, "Erasing flash region");
     if (!bl.flashEraseRegion(FLASH_BASE, eraseSize, 0)) {
         return false;
     }
 
     // Create FCB
     logVerbose("Creating Flash Configuration Block...");
+    machineStatus("FCB", 60, "Creating Flash Configuration Block");
     if (!bl.fillMemory(CONFIG_ADDR, 4, FCB_CONFIG)) {
         return false;
     }
@@ -796,15 +844,19 @@ bool flashFirmware(FirmwarePackage* pkg, bool skipSdp = false) {
     }
 
     logInfo("[7/7] Writing firmware (%zu bytes)...", pkg->firmware.size());
+    machineStatus("WRITE", 65, "Writing firmware");
+    g_currentStage = "WRITE";
     if (!bl.writeMemory(FIRMWARE_ADDR, pkg->firmwarePath, 0)) {
         return false;
     }
 
     logInfo("Resetting device...");
+    machineStatus("RESET", 95, "Resetting device");
     bl.reset();
     bl.close();
 
     logInfo("=== Flash complete! ===");
+    machineStatus("COMPLETE", 100, "Flash complete");
     return true;
 }
 
@@ -824,6 +876,7 @@ void printUsage() {
     printf("Options:\n");
     printf("  -v, --verbose                  Show detailed output\n");
     printf("  -n, --dry-run                  Validate without flashing\n");
+    printf("  -m, --machine                  Machine-readable output for tool integration\n");
     printf("  -h, --help                     Show this help\n");
     printf("\n");
     printf("Before flashing, put disting NT in bootloader mode:\n");
@@ -869,6 +922,9 @@ int main(int argc, char* argv[]) {
         }
         else if (arg == "-n" || arg == "--dry-run") {
             g_dryRun = true;
+        }
+        else if (arg == "-m" || arg == "--machine") {
+            g_machineOutput = true;
         }
         else if (arg == "--list") {
             listVersions = true;
