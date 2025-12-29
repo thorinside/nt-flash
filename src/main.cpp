@@ -25,6 +25,7 @@
 #include "blfwk/UsbHidPacketizer.h"
 #include "blfwk/Bootloader.h"
 #include "blfwk/Peripheral.h"
+#include "hidapi.h"
 
 // Embedded libraries
 #include "miniz.h"
@@ -646,27 +647,31 @@ public:
         return runCommand(args);
     }
 
-    bool flashEraseRegion(uint32_t address, uint32_t size) {
-        char addrStr[32], sizeStr[32];
+    bool flashEraseRegion(uint32_t address, uint32_t size, uint32_t memoryId = 0) {
+        char addrStr[32], sizeStr[32], memIdStr[32];
         snprintf(addrStr, sizeof(addrStr), "0x%X", address);
         snprintf(sizeStr, sizeof(sizeStr), "%u", size);
+        snprintf(memIdStr, sizeof(memIdStr), "%u", memoryId);
 
         string_vector_t args;
         args.push_back("flash-erase-region");
         args.push_back(addrStr);
         args.push_back(sizeStr);
+        args.push_back(memIdStr);  // Explicit memory ID (0 = internal/memory-mapped)
 
         return runCommand(args);
     }
 
-    bool writeMemory(uint32_t address, const std::string& filePath) {
-        char addrStr[32];
+    bool writeMemory(uint32_t address, const std::string& filePath, uint32_t memoryId = 0) {
+        char addrStr[32], memIdStr[32];
         snprintf(addrStr, sizeof(addrStr), "0x%X", address);
+        snprintf(memIdStr, sizeof(memIdStr), "%u", memoryId);
 
         string_vector_t args;
         args.push_back("write-memory");
         args.push_back(addrStr);
         args.push_back(filePath);
+        args.push_back(memIdStr);  // Explicit memory ID (0 = internal/memory-mapped)
 
         return runCommand(args);
     }
@@ -699,7 +704,7 @@ private:
 // Flash Orchestration
 //------------------------------------------------------------------------------
 
-bool flashFirmware(FirmwarePackage* pkg) {
+bool flashFirmware(FirmwarePackage* pkg, bool skipSdp = false) {
     if (!pkg || !pkg->valid) {
         logError("Invalid firmware package");
         return false;
@@ -707,36 +712,52 @@ bool flashFirmware(FirmwarePackage* pkg) {
 
     logInfo("=== Starting disting NT flash ===");
 
-    // Phase 1: SDP - Load flashloader
-    SDPOperations sdp;
+    // Phase 1: SDP - Load flashloader (skip if already in flashloader mode)
+    if (!skipSdp) {
+        SDPOperations sdp;
 
-    logInfo("[1/7] Connecting to SDP bootloader...");
-    if (!sdp.connect()) {
-        logError("Device not found in SDP mode");
-        logInfo("Make sure disting NT is in bootloader mode:");
-        logInfo("  Menu > Misc > Enter bootloader mode...");
-        return false;
-    }
+        logInfo("[1/7] Connecting to SDP bootloader...");
+        if (!sdp.connect()) {
+            // Check if device is already in flashloader mode
+            BootloaderOperations blCheck;
+            if (blCheck.connect()) {
+                logInfo("Device already in flashloader mode, skipping SDP phase...");
+                blCheck.close();
+                skipSdp = true;
+            } else {
+                logError("Device not found in SDP mode or flashloader mode");
+                logInfo("Make sure disting NT is in bootloader mode:");
+                logInfo("  Menu > Misc > Enter bootloader mode...");
+                return false;
+            }
+        }
 
-    logInfo("[2/7] Uploading flashloader to RAM...");
-    if (!sdp.writeFile(FLASHLOADER_ADDR, pkg->flashloaderPath)) {
-        return false;
-    }
+        if (!skipSdp) {
+            logInfo("[2/7] Uploading flashloader to RAM...");
+            if (!sdp.writeFile(FLASHLOADER_ADDR, pkg->flashloaderPath)) {
+                return false;
+            }
 
-    logInfo("[3/7] Starting flashloader...");
-    if (!sdp.jumpAddress(FLASHLOADER_ADDR)) {
-        return false;
-    }
+            logInfo("[3/7] Starting flashloader...");
+            if (!sdp.jumpAddress(FLASHLOADER_ADDR)) {
+                return false;
+            }
 
-    sdp.close();
+            sdp.close();
 
-    // Wait for device to re-enumerate
-    logInfo("[4/7] Waiting for flashloader to start...");
+            // Wait for device to re-enumerate (give it extra time on macOS)
+            logInfo("[4/7] Waiting for flashloader to start...");
 #ifdef WIN32
-    Sleep(3000);
+            Sleep(3000);
 #else
-    sleep(3);
+            sleep(5);  // Increased from 3 to 5 seconds
 #endif
+        }
+    }
+
+    // Reset HID subsystem to get fresh device list after re-enumeration
+    // This is critical on macOS where the IOHIDManager caches devices
+    hid_exit();
 
     // Phase 2: Bootloader - Flash firmware
     BootloaderOperations bl;
@@ -757,10 +778,11 @@ bool flashFirmware(FirmwarePackage* pkg) {
         return false;
     }
 
-    // Erase flash region
-    uint32_t eraseSize = ((pkg->firmware.size() + 0x1000 + 0xFFF) / 0x1000) * 0x1000;
+    // Erase flash region (FCB area + firmware size, matching official script exactly)
+    // The FCB is at 0x60000000, firmware starts at 0x60001000 (0x1000 offset)
+    uint32_t eraseSize = pkg->firmware.size() + 0x1000;  // Matches official: firmware + FCB area
     logVerbose("Erasing flash region 0x%08X, size %u bytes...", FLASH_BASE, eraseSize);
-    if (!bl.flashEraseRegion(FLASH_BASE, eraseSize)) {
+    if (!bl.flashEraseRegion(FLASH_BASE, eraseSize, 0)) {
         return false;
     }
 
@@ -774,7 +796,7 @@ bool flashFirmware(FirmwarePackage* pkg) {
     }
 
     logInfo("[7/7] Writing firmware (%zu bytes)...", pkg->firmware.size());
-    if (!bl.writeMemory(FIRMWARE_ADDR, pkg->firmwarePath)) {
+    if (!bl.writeMemory(FIRMWARE_ADDR, pkg->firmwarePath, 0)) {
         return false;
     }
 

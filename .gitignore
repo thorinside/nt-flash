@@ -21,7 +21,16 @@ sdphost
 
 # BMAD output (not for version control)
 _bmad-output/
+_bmad/
 
 # Debug files
 *.dSYM/
 *.log
+
+# Test files
+test_*
+
+# AI assistant directories
+.agent/
+.claude/
+.opencode/
