@@ -96,7 +96,8 @@ jobs:
           mingw32-make clean || true
           mingw32-make
 
-      - name: Prepare release package
+      - name: Prepare release package (Unix)
+        if: matrix.os != 'windows-latest'
         shell: bash
         run: |
           VERSION="${{ steps.get_version.outputs.version }}"
@@ -112,6 +113,20 @@ jobs:
           else
             zip -r "${ARCHIVE_NAME}.${{ matrix.archive_ext }}" "${ARCHIVE_NAME}"
           fi
+
+      - name: Prepare release package (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: msys2 {0}
+        run: |
+          VERSION="${{ steps.get_version.outputs.version }}"
+          ARCHIVE_NAME="nt-flash-${VERSION}-${{ matrix.name }}"
+
+          mkdir -p "release/${ARCHIVE_NAME}"
+          cp "${{ matrix.artifact }}" "release/${ARCHIVE_NAME}/"
+          cp README.md "release/${ARCHIVE_NAME}/"
+
+          cd release
+          zip -r "${ARCHIVE_NAME}.${{ matrix.archive_ext }}" "${ARCHIVE_NAME}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
