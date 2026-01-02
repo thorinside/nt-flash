@@ -188,9 +188,6 @@ jobs:
           sudo udevadm control --reload-rules
           ```
 
-          ### Windows
-          Install the WinUSB driver using [Zadig](https://zadig.akeo.ie/).
-
           ## Usage
 
           ```bash

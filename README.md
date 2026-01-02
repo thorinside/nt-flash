@@ -41,16 +41,6 @@ mingw32-make
 
 The build produces a single binary: `nt-flash` (or `nt-flash.exe` on Windows).
 
-### Windows Driver Setup (One-time)
-
-On Windows, you need to install the WinUSB driver for the disting NT:
-
-1. Put disting NT in bootloader mode (Menu > Misc > Enter bootloader mode...)
-2. Download and run [Zadig](https://zadig.akeo.ie/)
-3. Select "NXP SEMICONDUCTORS NXP USB..." from the device list
-4. Select "WinUSB" as the driver
-5. Click "Install Driver"
-
 ## Usage
 
 ### Put disting NT in bootloader mode first
@@ -134,10 +124,6 @@ The flash process involves two stages:
 ### Permission denied (Linux)
 
 Run with sudo or set up udev rules as above.
-
-### Windows: Device not recognized
-
-Install the WinUSB driver using Zadig (see Windows Driver Setup above).
 
 ## License
 
