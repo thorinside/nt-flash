@@ -84,6 +84,8 @@ ifeq ($(findstring MINGW,$(UNAME_S)),MINGW)
     PLATFORM_DEFS := -DWIN32 -DBOOTLOADER_HOST -D_WIN32_WINNT=0x0601
     # -include cstring ensures strcmp/memset etc. are available in all C++ files
     PLATFORM_CXX_EXTRA := -include cstring
+    # -static links runtime statically so DLLs aren't needed
+    PLATFORM_LDFLAGS := -static
     PLATFORM_LIBS := -lsetupapi -lhid -lws2_32
     BLFWK_OBJS += $(BLFWK_SRC)/hid-windows.o
     TARGET_EXT := .exe
@@ -94,6 +96,8 @@ ifeq ($(findstring MSYS,$(UNAME_S)),MSYS)
     PLATFORM_DEFS := -DWIN32 -DBOOTLOADER_HOST -D_WIN32_WINNT=0x0601
     # -include cstring ensures strcmp/memset etc. are available in all C++ files
     PLATFORM_CXX_EXTRA := -include cstring
+    # -static links runtime statically so DLLs aren't needed
+    PLATFORM_LDFLAGS := -static
     PLATFORM_LIBS := -lsetupapi -lhid -lws2_32
     BLFWK_OBJS += $(BLFWK_SRC)/hid-windows.o
     TARGET_EXT := .exe
@@ -129,7 +133,7 @@ endif
 
 # Build the unified tool
 $(TARGET)$(TARGET_EXT): $(OBJS) $(BLFWK_OBJS) $(LIB_MINIZ) $(LIB_CJSON)
-	$(CXX) $(CXXFLAGS) -o $@ $^ $(PLATFORM_LIBS)
+	$(CXX) $(CXXFLAGS) $(PLATFORM_LDFLAGS) -o $@ $^ $(PLATFORM_LIBS)
 
 # Build individual blhost/sdphost tools (for testing)
 tools: blhost sdphost
