@@ -83,8 +83,16 @@ jobs:
             mingw-w64-x86_64-make
             zip
 
-      - name: Build (Unix)
-        if: matrix.os != 'windows-latest'
+      - name: Build (macOS - Universal Binary)
+        if: matrix.os == 'macos-latest'
+        run: |
+          make clean || true
+          make universal
+          echo "Binary architecture info:"
+          file nt-flash
+
+      - name: Build (Linux)
+        if: matrix.os == 'ubuntu-latest'
         run: |
           make clean || true
           make

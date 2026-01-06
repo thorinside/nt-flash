@@ -105,19 +105,44 @@ endif
 
 # Compiler flags
 # Note: -I$(BLFWK_DIR)/src allows includes like "blfwk/Logging.h"
-CXXFLAGS := -std=c++11 -O2 -Wall $(PLATFORM_DEFS) $(PLATFORM_CXX_EXTRA) \
+# CXXFLAGS_ARCH/CFLAGS_ARCH/LDFLAGS_ARCH can be set for cross-compilation (e.g., -arch arm64)
+CXXFLAGS := -std=c++11 -O2 -Wall $(PLATFORM_DEFS) $(PLATFORM_CXX_EXTRA) $(CXXFLAGS_ARCH) \
 	-I$(BLFWK_DIR)/src -I$(BLFWK_INC) -I$(INC_DIR) -Ilib/miniz -Ilib/cJSON -Iinclude
 
-CFLAGS := -O2 -Wall $(PLATFORM_DEFS) \
+CFLAGS := -O2 -Wall $(PLATFORM_DEFS) $(CFLAGS_ARCH) \
 	-I$(BLFWK_DIR)/src -I$(BLFWK_INC) -Ilib/miniz -Ilib/cJSON
+
+LDFLAGS := $(PLATFORM_LDFLAGS) $(LDFLAGS_ARCH)
 
 # Patch marker file
 PATCH_MARKER := $(BLFWK_SRC)/.patched
 
 # Build targets
-.PHONY: all clean tools patch-lib
+.PHONY: all clean tools patch-lib universal
 
 all: $(TARGET)$(TARGET_EXT)
+
+# macOS universal binary (arm64 + x86_64)
+# This target builds both architectures and combines them with lipo
+ifeq ($(UNAME_S),Darwin)
+universal: clean
+	@echo "Building arm64 binary..."
+	$(MAKE) CXXFLAGS_ARCH="-arch arm64" CFLAGS_ARCH="-arch arm64" LDFLAGS_ARCH="-arch arm64"
+	mv $(TARGET) $(TARGET)-arm64
+	$(MAKE) clean-objs
+	@echo "Building x86_64 binary..."
+	$(MAKE) CXXFLAGS_ARCH="-arch x86_64" CFLAGS_ARCH="-arch x86_64" LDFLAGS_ARCH="-arch x86_64"
+	mv $(TARGET) $(TARGET)-x86_64
+	@echo "Creating universal binary..."
+	lipo -create -output $(TARGET) $(TARGET)-arm64 $(TARGET)-x86_64
+	rm -f $(TARGET)-arm64 $(TARGET)-x86_64
+	@echo "Universal binary created:"
+	file $(TARGET)
+
+clean-objs:
+	rm -f $(OBJS) $(BLFWK_OBJS) $(LIB_MINIZ) $(LIB_CJSON)
+	rm -f $(BLFWK_DIR)/sdphost.o $(BLFWK_DIR)/proj/blhost/src/blhost.o
+endif
 
 # Apply patches to library (macOS only - skip IOHIDManagerOpen which fails on newer macOS)
 patch-lib: $(PATCH_MARKER)
@@ -133,7 +158,7 @@ endif
 
 # Build the unified tool
 $(TARGET)$(TARGET_EXT): $(OBJS) $(BLFWK_OBJS) $(LIB_MINIZ) $(LIB_CJSON)
-	$(CXX) $(CXXFLAGS) $(PLATFORM_LDFLAGS) -o $@ $^ $(PLATFORM_LIBS)
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $^ $(PLATFORM_LIBS)
 
 # Build individual blhost/sdphost tools (for testing)
 tools: blhost sdphost
