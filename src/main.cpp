@@ -171,6 +171,24 @@ bool loadFile(const char* path, std::vector<uint8_t>& data) {
     return true;
 }
 
+// Get the system temp directory (cross-platform)
+std::string getTempDir() {
+#ifdef WIN32
+    char tempPath[MAX_PATH];
+    DWORD len = GetTempPathA(MAX_PATH, tempPath);
+    if (len > 0 && len < MAX_PATH) {
+        return std::string(tempPath);
+    }
+    const char* userProfile = getenv("USERPROFILE");
+    if (userProfile) {
+        return std::string(userProfile) + "\\Downloads\\";
+    }
+    return ".\\";
+#else
+    return "/tmp/";
+#endif
+}
+
 // Save data to a temporary file
 std::string saveToTempFile(const std::vector<uint8_t>& data, const char* suffix) {
 #ifdef WIN32
@@ -965,7 +983,7 @@ int main(int argc, char* argv[]) {
 
     if (!version.empty()) {
         // Download specific version
-        tempZipPath = "/tmp/distingNT_" + version + ".zip";
+        tempZipPath = getTempDir() + "distingNT_" + version + ".zip";
         char downloadUrl[512];
         snprintf(downloadUrl, sizeof(downloadUrl), "%sdistingNT_%s.zip",
                  FIRMWARE_BASE_URL, version.c_str());
@@ -976,7 +994,7 @@ int main(int argc, char* argv[]) {
     }
     else if (!url.empty()) {
         // Download from URL
-        tempZipPath = "/tmp/distingNT_download.zip";
+        tempZipPath = getTempDir() + "distingNT_download.zip";
         if (!downloadFile(url.c_str(), tempZipPath.c_str())) {
             return 1;
         }
