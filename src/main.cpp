@@ -185,6 +185,12 @@ std::string getTempDir() {
     }
     return ".\\";
 #else
+    const char* tmpdir = getenv("TMPDIR");
+    if (tmpdir && tmpdir[0]) {
+        std::string dir(tmpdir);
+        if (dir.back() != '/') dir += '/';
+        return dir;
+    }
     return "/tmp/";
 #endif
 }
@@ -198,7 +204,7 @@ std::string saveToTempFile(const std::vector<uint8_t>& data, const char* suffix)
     GetTempFileNameA(tempPath, "ntf", 0, tempFile);
     std::string path = std::string(tempFile) + suffix;
 #else
-    std::string path = std::string("/tmp/nt_flash_XXXXXX") + suffix;
+    std::string path = getTempDir() + "nt_flash_XXXXXX" + suffix;
     // Create unique file
     char* pathBuf = strdup(path.c_str());
     int fd = mkstemps(pathBuf, strlen(suffix));
