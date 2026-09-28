@@ -13,6 +13,8 @@
 #include <string>
 #include <vector>
 #include <stdexcept>
+#include <regex>
+#include <sstream>
 
 // BLFWK includes
 #include "blfwk/Logging.h"
@@ -74,6 +76,7 @@ const uint32_t BL_TIMEOUT_MS = 60000;  // Long timeout for flash operations
 
 // Expert Sleepers firmware URLs
 const char* FIRMWARE_BASE_URL = "https://www.expert-sleepers.co.uk/downloads/firmware/";
+const char* FIRMWARE_UPDATES_URL = "https://www.expert-sleepers.co.uk/distingNTfirmwareupdates.html";
 
 //------------------------------------------------------------------------------
 // Globals
@@ -378,9 +381,11 @@ FirmwarePackage* loadFirmwarePackage(const char* zipPath) {
 //------------------------------------------------------------------------------
 
 // Download a file using system curl
-bool downloadFile(const char* url, const char* destPath) {
+bool downloadFile(const char* url, const char* destPath, const char* description = "firmware") {
     logInfo("Downloading: %s", url);
-    machineStatus("DOWNLOAD", 0, "Downloading firmware");
+    char statusMessage[128];
+    snprintf(statusMessage, sizeof(statusMessage), "Downloading %s", description);
+    machineStatus("DOWNLOAD", 0, statusMessage);
 
     char cmd[2048];
 #ifdef WIN32
@@ -396,6 +401,64 @@ bool downloadFile(const char* url, const char* destPath) {
     }
 
     logVerbose("Downloaded to: %s", destPath);
+    return true;
+}
+
+std::vector<int> parseVersion(const std::string& version) {
+    std::vector<int> parts;
+    std::stringstream stream(version);
+    std::string part;
+    while (std::getline(stream, part, '.')) {
+        parts.push_back(atoi(part.c_str()));
+    }
+    return parts;
+}
+
+bool isNewerVersion(const std::string& candidate, const std::string& current) {
+    std::vector<int> candidateParts = parseVersion(candidate);
+    std::vector<int> currentParts = parseVersion(current);
+    size_t count = candidateParts.size() > currentParts.size()
+        ? candidateParts.size() : currentParts.size();
+
+    for (size_t i = 0; i < count; i++) {
+        int candidatePart = i < candidateParts.size() ? candidateParts[i] : 0;
+        int currentPart = i < currentParts.size() ? currentParts[i] : 0;
+        if (candidatePart != currentPart) {
+            return candidatePart > currentPart;
+        }
+    }
+    return false;
+}
+
+bool findLatestFirmwareVersion(std::string& latestVersion) {
+    std::string indexPath = getTempDir() + "distingNT_firmware_updates.html";
+    if (!downloadFile(FIRMWARE_UPDATES_URL, indexPath.c_str(), "firmware index")) {
+        return false;
+    }
+
+    std::vector<uint8_t> indexData;
+    bool loaded = loadFile(indexPath.c_str(), indexData);
+    remove(indexPath.c_str());
+    if (!loaded) {
+        return false;
+    }
+
+    std::string html(indexData.begin(), indexData.end());
+    std::regex firmwarePattern("distingNT_([0-9]+(\\.[0-9]+)+)\\.zip");
+    std::sregex_iterator match(html.begin(), html.end(), firmwarePattern);
+    std::sregex_iterator end;
+
+    for (; match != end; ++match) {
+        std::string version = (*match)[1].str();
+        if (latestVersion.empty() || isNewerVersion(version, latestVersion)) {
+            latestVersion = version;
+        }
+    }
+
+    if (latestVersion.empty()) {
+        logError("No disting NT firmware versions found at %s", FIRMWARE_UPDATES_URL);
+        return false;
+    }
     return true;
 }
 
@@ -974,14 +1037,17 @@ int main(int argc, char* argv[]) {
     // Handle --list
     if (listVersions) {
         logInfo("Available firmware versions from Expert Sleepers:");
-        logInfo("  https://www.expert-sleepers.co.uk/distingNTfirmwareupdates.html");
+        logInfo("  %s", FIRMWARE_UPDATES_URL);
         logInfo("\nKnown versions: 1.12.0, 1.11.0, 1.10.0, 1.9.0, 1.8.0, 1.7.1, 1.7.0, 1.6.1, 1.6.0");
         return 0;
     }
 
     if (useLatest) {
-        logInfo("Downloading latest firmware (1.12.0)...");
-        version = "1.12.0";
+        logInfo("Checking for the latest firmware...");
+        if (!findLatestFirmwareVersion(version)) {
+            return 1;
+        }
+        logInfo("Latest firmware version: %s", version.c_str());
     }
 
     // Determine source
