@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       use_latest_tag:
-        description: 'Use latest tag for release'
+        description: 'Build the latest tag and publish its release; disable for a build-only validation of the selected ref'
         required: true
         default: 'true'
         type: boolean
@@ -49,7 +49,7 @@ jobs:
         id: get_version
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.use_latest_tag }}" = "true" ]; then
             LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
             if [ -z "$LATEST_TAG" ]; then
               echo "Error: No tags found"
@@ -57,6 +57,8 @@ jobs:
             fi
             echo "version=$LATEST_TAG" >> $GITHUB_OUTPUT
             git checkout "$LATEST_TAG"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=validation-${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
           else
             echo "version=${{ github.ref_name }}" >> $GITHUB_OUTPUT
           fi
@@ -76,11 +78,11 @@ jobs:
         if: matrix.os == 'windows-latest'
         uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          msystem: UCRT64
           update: true
           install: >-
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-make
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-make
             zip
 
       - name: Build (macOS - Universal Binary)
@@ -103,6 +105,22 @@ jobs:
         run: |
           mingw32-make clean || true
           mingw32-make
+
+      - name: Smoke test Windows binary
+        if: matrix.os == 'windows-latest'
+        shell: msys2 {0}
+        run: |
+          file nt-flash.exe
+          ./nt-flash.exe --version-info
+          ./nt-flash.exe --help
+          ./nt-flash.exe --dry-run --latest
+
+          IMPORTS=$(objdump -p nt-flash.exe | awk '/DLL Name:/ { print $3 }')
+          printf 'Imported DLLs:\n%s\n' "$IMPORTS"
+          if printf '%s\n' "$IMPORTS" | grep -Eiq 'libgcc|libstdc\+\+|libwinpthread'; then
+            echo "Error: executable depends on a MinGW runtime DLL"
+            exit 1
+          fi
 
       - name: Prepare release package (Unix)
         if: matrix.os != 'windows-latest'
@@ -143,6 +161,7 @@ jobs:
           path: release/*.${{ matrix.archive_ext }}
 
   release:
+    if: github.event_name != 'workflow_dispatch' || inputs.use_latest_tag
     needs: build
     runs-on: ubuntu-latest
 
