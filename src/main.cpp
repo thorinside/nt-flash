@@ -967,16 +967,21 @@ bool flashFirmware(FirmwarePackage* pkg, bool skipSdp = false) {
         bool sdpConnected = sdp.connect();
 
         if (!sdpConnected) {
-            // Check if device is already in flashloader mode
-            BootloaderOperations blCheck;
-            machineStatus("BL_CHECK", 10, "Checking for flashloader mode");
-            if (blCheck.connect()) {
-                logInfo("Device already in flashloader mode, skipping SDP phase...");
-                machineStatus("BL_FOUND", 15, "Device already in flashloader mode");
-                blCheck.close();
-                skipSdp = true;
+            // Probing the flashloader costs ~5s of retries, so only do it when a
+            // flashloader interface is actually enumerated.
+            bool flashloaderRunning = false;
+            if (flashloaderPresent()) {
+                BootloaderOperations blCheck;
+                machineStatus("BL_CHECK", 10, "Checking for flashloader mode");
+                if (blCheck.connect()) {
+                    logInfo("Device already in flashloader mode, skipping SDP phase...");
+                    machineStatus("BL_FOUND", 15, "Device already in flashloader mode");
+                    blCheck.close();
+                    skipSdp = true;
+                    flashloaderRunning = true;
+                }
             }
-            else if (g_autoBootloader) {
+            if (!flashloaderRunning && g_autoBootloader) {
                 // Not in SDP mode - ask the running firmware to reboot into the bootloader.
                 logInfo("Device not in bootloader mode, requesting it over MIDI...");
                 machineStatus("BOOTLOADER", 12, "Requesting bootloader mode via MIDI SysEx");
@@ -1182,6 +1187,10 @@ int main(int argc, char* argv[]) {
         }
         else if (arg == "--midi-port" && i + 1 < argc) {
             g_midiPort = argv[++i];
+            if (g_midiPort.empty()) {
+                logError("--midi-port must not be empty");
+                return 1;
+            }
         }
         else if (arg == "--sysex-id" && i + 1 < argc) {
             const char* value = argv[++i];

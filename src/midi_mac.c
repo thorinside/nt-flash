@@ -40,8 +40,9 @@ static int containsNoCase(const char* haystack, const char* needle) {
 }
 
 int es_midi_list_outputs(char* out, int maxPorts) {
+    g_error[0] = '\0';
     MIDIClientRef client;
-    OSStatus st = MIDIClientCreate(CFSTR("ntx-flash"), NULL, NULL, &client);
+    OSStatus st = MIDIClientCreate(CFSTR("es-flash"), NULL, NULL, &client);
     if (st != noErr) {
         snprintf(g_error, sizeof g_error, "MIDIClientCreate failed (%d)", (int)st);
         return -1;
@@ -66,7 +67,7 @@ int es_midi_send_sysex(const char* portNameSubstr, const uint8_t* data, size_t l
     }
 
     MIDIClientRef client;
-    OSStatus st = MIDIClientCreate(CFSTR("ntx-flash"), NULL, NULL, &client);
+    OSStatus st = MIDIClientCreate(CFSTR("es-flash"), NULL, NULL, &client);
     if (st != noErr) {
         snprintf(g_error, sizeof g_error, "MIDIClientCreate failed (%d)", (int)st);
         return -1;
@@ -94,7 +95,7 @@ int es_midi_send_sysex(const char* portNameSubstr, const uint8_t* data, size_t l
     }
 
     MIDIPortRef port;
-    st = MIDIOutputPortCreate(client, CFSTR("ntx-flash-out"), &port);
+    st = MIDIOutputPortCreate(client, CFSTR("es-flash-out"), &port);
     if (st != noErr) {
         snprintf(g_error, sizeof g_error, "MIDIOutputPortCreate failed (%d)", (int)st);
         MIDIClientDispose(client);

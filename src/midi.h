@@ -2,8 +2,7 @@
  * Minimal MIDI SysEx output for the Expert Sleepers firmware tools
  *
  * These modules only expose their USB bootloader after being told, over MIDI
- * SysEx, to reboot into bootloader mode (the "Reboot in bootloader mode"
- * button in the web configuration tool). These functions send that message
+ * SysEx, to reboot into bootloader mode. These functions send that message
  * without pulling in a MIDI library.
  *
  * One backend per platform, selected by the Makefile:
@@ -12,8 +11,8 @@
  *   midi_win.c    WinMM      (Windows)
  *   midi_none.c   stub       (anything else)
  */
-#ifndef NTX_MIDI_H
-#define NTX_MIDI_H
+#ifndef ES_MIDI_H
+#define ES_MIDI_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -50,4 +49,4 @@ const char* es_midi_error(void);
 }
 #endif
 
-#endif /* NTX_MIDI_H */
+#endif /* ES_MIDI_H */

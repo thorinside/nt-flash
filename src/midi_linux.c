@@ -35,11 +35,11 @@ static snd_seq_t* openSeq(void) {
         snprintf(g_error, sizeof g_error, "snd_seq_open failed: %s", snd_strerror(err));
         return NULL;
     }
-    snd_seq_set_client_name(seq, "ntx-flash");
+    snd_seq_set_client_name(seq, "es-flash");
     return seq;
 }
 
-/* Port name as shown by a2jmidid / the ALSA sequencer, e.g. "NTX-8CV". */
+/* Port name as shown to other ALSA clients (see --list-midi-ports). */
 static void portName(snd_seq_t* seq, int client, int port, char* out, size_t n) {
     snd_seq_port_info_t* info;
     snd_seq_port_info_alloca(&info);
