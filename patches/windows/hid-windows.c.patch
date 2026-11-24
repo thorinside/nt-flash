@@ -1,0 +1,61 @@
+--- a/hid-windows.c
++++ b/hid-windows.c
+@@ -619,6 +619,15 @@
+ err:
+     free_hid_device(dev);
+     return NULL;
++}
++
++/* Cancellation is asynchronous. Do not reuse or release an OVERLAPPED, its
++ * event, or its buffer until the kernel has completed that particular I/O. */
++static void cancel_and_drain(HANDLE file, OVERLAPPED *io)
++{
++    DWORD ignored;
++    CancelIoEx(file, io); /* ERROR_NOT_FOUND is normal if completion won the race. */
++    GetOverlappedResult(file, io, &ignored, TRUE);
+ }
+ 
+ int HID_API_EXPORT HID_API_CALL hid_write_timeout(hid_device *dev,
+@@ -660,8 +669,7 @@
+     {
+         if (GetLastError() != ERROR_IO_PENDING)
+         {
+-            /* WriteFile() failed. Return error. */
+-            CancelIo(dev->device_handle);
++            /* WriteFile() failed without queuing this write. */
+             register_error(dev, L"WriteFile");
+             bytes_written = -1;
+             goto end_of_function;
+@@ -672,9 +680,10 @@
+     res = WaitForSingleObject(dev->write_ol.hEvent, milliseconds);
+     if (res != WAIT_OBJECT_0)
+     {
+-        /* The WaitForSingleObject operation failed. */
+-        CancelIo(dev->device_handle);
++        if (res == WAIT_TIMEOUT)
++            SetLastError(ERROR_TIMEOUT);
+         register_error(dev, L"WaitForSingleObject");
++        cancel_and_drain(dev->device_handle, &dev->write_ol);
+         bytes_written = -1;
+         goto end_of_function;
+     }
+@@ -718,8 +727,7 @@
+             if (GetLastError() != ERROR_IO_PENDING)
+             {
+                 /* ReadFile() has failed.
+-                Clean up and return error. */
+-                CancelIo(dev->device_handle);
++                No read was queued. */
+                 dev->read_pending = FALSE;
+                 goto end_of_function;
+             }
+@@ -845,7 +853,8 @@
+ {
+     if (!dev)
+         return;
+-    CancelIo(dev->device_handle);
++    if (dev->read_pending)
++        cancel_and_drain(dev->device_handle, &dev->read_ol);
+     free_hid_device(dev);
+ }
+ 

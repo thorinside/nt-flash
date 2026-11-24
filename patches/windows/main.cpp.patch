@@ -1,0 +1,114 @@
+--- a/main.cpp
++++ b/main.cpp
+@@ -42,6 +42,10 @@
+ 
+ #if defined(WIN32)
+ #include <windows.h>
++#include <cfgmgr32.h>
++extern "C" {
++#include <hidsdi.h>
++}
+ #else
+ #include <unistd.h>
+ #include <signal.h>
+@@ -634,7 +638,8 @@
+             delete m_packetizer;
+             m_packetizer = nullptr;
+         }
+-        // Peripheral is owned by packetizer, don't double-delete
++        // Unlike UsbHidPacketizer, SDPUsbHidPacketizer only borrows it.
++        delete m_peripheral;
+         m_peripheral = nullptr;
+     }
+ 
+@@ -646,6 +651,29 @@
+ //------------------------------------------------------------------------------
+ // Bootloader Operations (Flashloader)
+ //------------------------------------------------------------------------------
++
++// Query PnP's list of *present* interfaces, not WinMM or a new HID handle.
++// Enumeration errors (including a changing list) aren't evidence of removal.
++static bool waitForFlashloaderRemoval(const std::string& path) {
++    GUID hidClass;
++    HidD_GetHidGuid(&hidClass);
++    const ULONGLONG start = GetTickCount64();
++    do {
++        ULONG size = 0;
++        if (CM_Get_Device_Interface_List_SizeA(&size, &hidClass, nullptr,
++                CM_GET_DEVICE_INTERFACE_LIST_PRESENT) == CR_SUCCESS && size) {
++            std::vector<char> paths(size);
++            if (CM_Get_Device_Interface_ListA(&hidClass, nullptr, paths.data(), size,
++                    CM_GET_DEVICE_INTERFACE_LIST_PRESENT) == CR_SUCCESS) {
++                const char* p = paths.data();
++                while (*p && _stricmp(p, path.c_str()) != 0) p += strlen(p) + 1;
++                if (!*p) return true;
++            }
++        }
++        Sleep(200);
++    } while (GetTickCount64() - start < 5000);
++    return false;
++}
+ 
+ class BootloaderOperations {
+ public:
+@@ -671,6 +699,13 @@
+                 config.packetTimeoutMs = BL_TIMEOUT_MS;
+                 config.ping = false;
+ 
++                // Bind the same path we will observe after reset. Another NXP
++                // flashloader on the host must not affect the removal check.
++                hid_device_info* interfaces = hid_enumerate(BL_VID, BL_PID);
++                m_path = interfaces && interfaces->path ? interfaces->path : "";
++                hid_free_enumeration(interfaces);
++                if (m_path.empty()) throw std::runtime_error("No flashloader interface");
++                config.usbPath = m_path;
+                 m_bootloader = new Bootloader(config);
+ 
+                 // Test with get-property command
+@@ -820,15 +855,20 @@
+         return runCommand(args);
+     }
+ 
+-    bool reset() {
+-        string_vector_t args;
+-        args.push_back("reset");
+-
+-        try {
+-            runCommand(args);
++    bool resetAndClose() {
++        if (g_dryRun) {
++            logVerbose("[DRY RUN] Would reset the flashloader and release its HID handle");
++            return true;
+         }
+-        catch (...) {
+-            // Expected - device disconnects
++        bool sent = runCommand({"reset"});
++        close();  // Release HID before waiting for PnP or notifying the MIDI client.
++        if (!sent) {
++            logError("Firmware written, but the flashloader reset failed. Power-cycle the module.");
++            return false;
++        }
++        if (!waitForFlashloaderRemoval(m_path)) {
++            logError("Firmware written, but Windows did not confirm flashloader removal. Power-cycle the module.");
++            return false;
+         }
+         return true;
+     }
+@@ -842,6 +882,7 @@
+ 
+ private:
+     Bootloader* m_bootloader;
++    std::string m_path;
+ };
+ 
+ //------------------------------------------------------------------------------
+@@ -1097,8 +1138,7 @@
+ 
+     logInfo("Resetting device...");
+     machineStatus("RESET", 95, "Resetting device");
+-    bl.reset();
+-    bl.close();
++    if (!bl.resetAndClose()) return false;
+ 
+     logInfo("=== Flash complete! ===");
+     machineStatus("COMPLETE", 100, "Flash complete");

@@ -1,0 +1,127 @@
+--- a/midi_win.c
++++ b/midi_win.c
+@@ -54,6 +54,17 @@
+     return n;
+ }
+ 
++// WinMM permits unprepare after submission; STILLPLAYING means it still owns
++// both the MIDIHDR and lpData. No callback or unsynchronised flag reads needed.
++static MMRESULT waitForRelease(HMIDIOUT out, MIDIHDR* header) {
++    ULONGLONG start = GetTickCount64();
++    for (;;) {
++        MMRESULT rc = midiOutUnprepareHeader(out, header, sizeof *header);
++        if (rc != MIDIERR_STILLPLAYING || GetTickCount64() - start >= 2000) return rc;
++        Sleep(10);
++    }
++}
++
+ int es_midi_send_sysex(const char* portNameSubstr, const uint8_t* data, size_t len) {
+     g_error[0] = '\0';
+     if (!data || len == 0) {
+@@ -61,6 +72,11 @@
+         return -1;
+     }
+ 
++    if (len > MAXDWORD || len > SIZE_MAX - sizeof(MIDIHDR)) {
++        snprintf(g_error, sizeof g_error, "SysEx message too large");
++        return -1;
++    }
++
+     UINT count = midiOutGetNumDevs();
+     UINT chosen = (UINT)-1;
+     char chosenName[ES_MIDI_PORT_NAME_MAX] = {0};
+@@ -89,63 +105,48 @@
+         return -1;
+     }
+ 
+-    /* volatile: the driver writes dwFlags from another thread. */
+-    volatile MIDIHDR* hdr = (volatile MIDIHDR*)calloc(1, sizeof(MIDIHDR));
++    // The caller's bytes may be on its stack. Keep one allocation alive for
++    // the entire driver loan, including surprise removal and reset.
++    MIDIHDR* hdr = (MIDIHDR*)calloc(1, sizeof *hdr + len);
++    int rc = -1;
+     if (!hdr) {
+         snprintf(g_error, sizeof g_error, "out of memory");
+-        midiOutClose(handle);
+-        return -1;
++        goto close_port;
+     }
+-    hdr->lpData = (LPSTR)data;
++    hdr->lpData = (LPSTR)(hdr + 1);
++    memcpy(hdr->lpData, data, len);
+     hdr->dwBufferLength = (DWORD)len;
+-    hdr->dwBytesRecorded = (DWORD)len;
+-
+-    res = midiOutPrepareHeader(handle, (LPMIDIHDR)hdr, sizeof(MIDIHDR));
++    res = midiOutPrepareHeader(handle, hdr, sizeof *hdr);
+     if (res != MMSYSERR_NOERROR) {
+         setWinError("midiOutPrepareHeader failed", res);
+-        free((void*)hdr);
+-        midiOutClose(handle);
+-        return -1;
+-    }
++    } else {
++        res = midiOutLongMsg(handle, hdr, sizeof *hdr);
++        if (res == MMSYSERR_NOERROR) rc = 0;
++        else setWinError("midiOutLongMsg failed", res);
+ 
+-    res = midiOutLongMsg(handle, (LPMIDIHDR)hdr, sizeof(MIDIHDR));
+-    if (res != MMSYSERR_NOERROR) {
+-        setWinError("midiOutLongMsg failed", res);
+-        midiOutUnprepareHeader(handle, (LPMIDIHDR)hdr, sizeof(MIDIHDR));
+-        free((void*)hdr);
+-        midiOutClose(handle);
+-        return -1;
+-    }
+-
+-    /* Wait for the driver to hand the buffer back before freeing it. */
+-    int done = 0;
+-    for (int i = 0; i < 200; i++) {
+-        if (hdr->dwFlags & MHDR_DONE) {
+-            done = 1;
+-            break;
++        res = waitForRelease(handle, hdr);
++        if (res == MIDIERR_STILLPLAYING) {
++            rc = -1;
++            snprintf(g_error, sizeof g_error, "timed out sending SysEx to \"%s\"", chosenName);
++            MMRESULT reset = midiOutReset(handle);
++            if (reset != MMSYSERR_NOERROR) setWinError("midiOutReset failed", reset);
++            res = waitForRelease(handle, hdr);
+         }
+-        Sleep(10);
++        if (res != MMSYSERR_NOERROR) {
++            // No proof of release. This single-shot CLI must exit with an
++            // error; let process teardown reclaim the loan, not free().
++            setWinError("MIDI driver did not release the SysEx buffer", res);
++            rc = -1;
++            goto close_port;
++        }
+     }
++    free(hdr);
+ 
+-    int rc = 0;
+-    if (!done) {
+-        /* The driver still owns the buffer: stop playback and wait for it to be
+-         * returned. Reporting success here would free memory the driver may
+-         * still write to. */
+-        midiOutReset(handle);
+-        for (int i = 0; i < 200 && !(hdr->dwFlags & MHDR_DONE); i++) Sleep(10);
+-        snprintf(g_error, sizeof g_error, "timed out sending SysEx to \"%s\"", chosenName);
++close_port:
++    res = midiOutClose(handle);
++    if (res != MMSYSERR_NOERROR) {
++        if (rc == 0) setWinError("midiOutClose failed", res);
+         rc = -1;
+     }
+-
+-    if (midiOutUnprepareHeader(handle, (LPMIDIHDR)hdr, sizeof(MIDIHDR)) == MIDIERR_STILLPLAYING) {
+-        if (rc == 0) {
+-            snprintf(g_error, sizeof g_error, "MIDI driver still holds the SysEx buffer for \"%s\"",
+-                     chosenName);
+-            rc = -1;
+-        }
+-    }
+-    free((void*)hdr);
+-    midiOutClose(handle);
+     return rc;
+ }

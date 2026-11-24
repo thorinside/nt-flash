@@ -142,6 +142,22 @@ WinMM on Windows.
 
 ## Troubleshooting
 
+### Windows: MIDI does not return after writing firmware
+
+The Windows build closes its bootloader handles and checks that the selected
+flashloader interface has disappeared before reporting completion. This is not
+a check that Windows MIDI Services has published the application endpoints.
+If reset fails, the image has already been written: power-cycle the module,
+rather than erasing and flashing again. If Windows sees the normal module but
+MIDI clients still do not, close the clients first. On systems using Windows
+MIDI Services, NT Helper's manual recovery is `Restart-Service MidiSrv` in
+an elevated PowerShell; this affects **all** MIDI clients. The flasher never
+restarts the service.
+
+Windows builds apply `patches/windows/*.patch` to disposable source copies,
+not to the checkout or the NXP submodule. Run `mingw32-make check-windows`
+in the Windows build shell to test the failure paths without a module.
+
 ### Device not found
 
 - Check the module is powered and connected over USB

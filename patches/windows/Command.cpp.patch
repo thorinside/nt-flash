@@ -1,0 +1,37 @@
+--- a/Command.cpp
++++ b/Command.cpp
+@@ -907,16 +907,27 @@
+ void Reset::sendTo(Packetizer &device)
+ {
+     blfwk::CommandPacket cmdPacket(kCommandTag_Reset, kCommandFlag_None);
+-    const uint8_t *responsePacket = cmdPacket.sendCommandGetResponse(device);
+-    if (responsePacket)
++    status_t status = device.writePacket(cmdPacket.getData(), cmdPacket.getSize(), kPacketType_Command);
++    if (status != kStatus_Success)
+     {
+-        processResponse(responsePacket);
++        m_responseValues.push_back(status);
++        return;
+     }
+-    else
+-    {
+-        Log::warning("Ignoring missing response from reset command.\n");
+-        this->m_responseValues.push_back(kStatus_Success);
++    uint8_t *response = NULL;
++    uint32_t length = 0;
++    if (device.readPacket(&response, &length, kPacketType_Command) != kStatus_Success)
++    {
++        // A delivered reset may disconnect before its ACK. The flasher checks
++        // for removal of the specific flashloader interface after closing it.
++        m_responseValues.push_back(kStatus_Success);
++        return;
++    }
++    if (!response || length < sizeof(generic_response_packet_t))
++    {
++        m_responseValues.push_back(kStatus_Fail);
++        return;
+     }
++    processResponse(response);
+ }
+ 
+ ////////////////////////////////////////////////////////////////////////////////

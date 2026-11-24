@@ -135,6 +135,10 @@ PATCH_MARKER := $(BLFWK_SRC)/.patched
 
 all: $(TARGET)$(TARGET_EXT)
 
+ifeq ($(TARGET_EXT),.exe)
+include patches/windows.mk
+endif
+
 # macOS universal binary (arm64 + x86_64)
 # This target builds both architectures and combines them with lipo
 ifeq ($(UNAME_S),Darwin)
