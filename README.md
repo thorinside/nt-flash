@@ -144,11 +144,11 @@ WinMM on Windows.
 
 ### Windows: MIDI does not return after writing firmware
 
-The Windows build closes its bootloader handles and checks that the selected
-flashloader interface has disappeared before reporting completion. This is not
-a check that Windows MIDI Services has published the application endpoints.
-If reset fails, the image has already been written: power-cycle the module,
-rather than erasing and flashing again. If Windows sees the normal module but
+After writing the image, the Windows build sends reset, closes its HID handle,
+and checks whether the same flashloader interface disappeared. If it cannot
+confirm that transition, it reports **firmware written; reset unconfirmed**.
+Neither outcome proves that the application's MIDI ports are back. Check the
+ports first; if absent, power-cycle the module rather than flashing again. If Windows sees the normal module but
 MIDI clients still do not, close the clients first. On systems using Windows
 MIDI Services, NT Helper's manual recovery is `Restart-Service MidiSrv` in
 an elevated PowerShell; this affects **all** MIDI clients. The flasher never

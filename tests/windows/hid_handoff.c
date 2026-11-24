@@ -5,16 +5,23 @@
 
 static OVERLAPPED *cancelled;
 static unsigned drains;
+static OVERLAPPED *expected;
+static HANDLE close_peer;
 
 static BOOL observe_cancel(HANDLE h, OVERLAPPED *io) {
-    assert(io && !cancelled);
+    assert(io == expected && !cancelled);
     cancelled = io;
+    // Force both possible races deterministically, not via sleep intervals.
+    if (close_peer) {
+        CloseHandle(close_peer);
+        close_peer = NULL;
+    }
     return CancelIoEx(h, io);
 }
 static BOOL observe_result(HANDLE h, OVERLAPPED *io, DWORD *n, BOOL wait) {
     BOOL ok = GetOverlappedResult(h, io, n, wait);
     if (io == cancelled) {
-        assert(wait && (ok || GetLastError() == ERROR_OPERATION_ABORTED));
+        assert(!wait && (ok || GetLastError() == ERROR_OPERATION_ABORTED || GetLastError() == ERROR_BROKEN_PIPE));
         cancelled = NULL;
         ++drains;
     }
@@ -24,7 +31,8 @@ static BOOL observe_result(HANDLE h, OVERLAPPED *io, DWORD *n, BOOL wait) {
 #define GetOverlappedResult observe_result
 #include "hid-windows.c"
 
-int main(void) {
+static void testHandoff(BOOL surpriseRemoval) {
+    drains = 0;
     char name[100];
     snprintf(name, sizeof name, "\\\\.\\pipe\\es-flash-io-%lu", GetCurrentProcessId());
     HANDLE server = CreateNamedPipeA(name, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
@@ -44,6 +52,7 @@ int main(void) {
     // times out. Only the write may be cancelled, not the outstanding read.
     const size_t size = 1024 * 1024;
     unsigned char *data = calloc(1, size);
+    expected = &dev->write_ol;
     assert(data && hid_write_timeout(dev, data, size, 0) == -1);
     free(data);
     assert(drains == 1 && !cancelled);
@@ -52,8 +61,18 @@ int main(void) {
     assert(WriteFile(peer, "\x01", 1, &written, NULL) && written == 1);
     assert(hid_read_timeout(dev, reply, sizeof reply, 1000) == 1 && reply[0] == 1);
     assert(hid_read_timeout(dev, reply, sizeof reply, 0) == 0 && dev->read_pending);
+    expected = &dev->read_ol;
+    // Complete the pending read before cancel: ERROR_NOT_FOUND is not a
+    // reason to keep waiting or discard a successful completion.
+    if (surpriseRemoval) close_peer = peer;
+    else assert(WriteFile(peer, "\x01", 1, &written, NULL));
     hid_close(dev);
     assert(drains == 2 && !cancelled);
-    CloseHandle(peer);
-    puts("HID handoff: timed-out write and close with pending read passed");
+    if (!surpriseRemoval) CloseHandle(peer);
+}
+
+int main(void) {
+    testHandoff(FALSE);
+    testHandoff(TRUE);
+    puts("HID handoff: write timeout, completion before cancel, and surprise removal passed");
 }

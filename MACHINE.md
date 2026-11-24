@@ -69,6 +69,13 @@ Emitted by `--list-midi-ports` in machine mode, one line per MIDI output port.
 | `RESET` | 95 | Resetting device |
 | `COMPLETE` | 100 | Flash complete |
 
+On Windows, after a flash, `COMPLETE:100` means the firmware write
+finished, **not** that the application MIDI endpoint has returned. Its message
+distinguishes observed flashloader removal from an unconfirmed reset. Start
+MIDI discovery on either completion; do not reflash merely because discovery
+takes time. An explicit reset rejection or failed write of the reset command
+without observed removal instead emits `ERROR:Firmware written, ...`.
+
 ## Example Output
 
 Successful flash:

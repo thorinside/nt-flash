@@ -1,0 +1,48 @@
+--- /dev/null
++++ b/win_handoff.h
+@@ -0,0 +1,45 @@
++// The flash image was written before this handoff. Neither a reset ACK nor
++// departure of the flashloader proves that application MIDI has enumerated.
++#pragma once
++#include "blfwk/Command.h"
++#include <cstring>
++
++namespace win_handoff {
++enum class Presence { unknown, present, absent };
++enum class Reply { accepted, rejected, writeError, noAck };
++enum class Outcome { removed, unverified, failed };
++
++inline Reply sendReset(blfwk::Packetizer& usb) {
++    blfwk::CommandPacket cmd(kCommandTag_Reset, kCommandFlag_None);
++    if (usb.writePacket(cmd.getData(), cmd.getSize(), kPacketType_Command) != kStatus_Success)
++        return Reply::writeError;
++
++    uint8_t* bytes = nullptr;
++    uint32_t size = 0;
++    generic_response_packet_t ack;
++    if (usb.readPacket(&bytes, &size, kPacketType_Command) != kStatus_Success ||
++        !bytes || size < sizeof ack)
++        return Reply::noAck;
++    memcpy(&ack, bytes, sizeof ack);
++    if (ack.commandPacket.commandTag != kCommandTag_GenericResponse ||
++        ack.commandPacket.parameterCount != 2 || ack.commandTag != kCommandTag_Reset)
++        return Reply::noAck;
++    return ack.status == kStatus_Success ? Reply::accepted : Reply::rejected;
++}
++
++template <typename Probe, typename Send, typename Close, typename Pause>
++Outcome handoff(Probe probe, Send send, Close close, Pause pause) {
++    const bool wasPresent = probe() == Presence::present;
++    const Reply reply = send();
++    close();
++    if (reply == Reply::rejected) return Outcome::failed;
++    if (wasPresent) {
++        for (unsigned i = 0; i < 26; ++i) {
++            if (i) pause();
++            if (probe() == Presence::absent)
++                return reply == Reply::writeError ? Outcome::unverified : Outcome::removed;
++        }
++    }
++    return reply == Reply::writeError ? Outcome::failed : Outcome::unverified;
++}
++} // namespace win_handoff
