@@ -110,6 +110,7 @@ int es_midi_send_sysex(const char* portNameSubstr, const uint8_t* data, size_t l
 
     int destClient = -1, destPort = -1;
     char destName[ES_MIDI_PORT_NAME_MAX] = {0};
+    int ownClient = snd_seq_client_id(seq);
 
     snd_seq_client_info_t* cinfo;
     snd_seq_port_info_t* pinfo;
@@ -119,6 +120,8 @@ int es_midi_send_sysex(const char* portNameSubstr, const uint8_t* data, size_t l
     snd_seq_client_info_set_client(cinfo, -1);
     while (destClient < 0 && snd_seq_query_next_client(seq, cinfo) >= 0) {
         int client = snd_seq_client_info_get_client(cinfo);
+        /* Never pick the ALSA System client (timer) or our own port. */
+        if (client == SND_SEQ_CLIENT_SYSTEM || client == ownClient) continue;
         snd_seq_port_info_set_client(pinfo, client);
         snd_seq_port_info_set_port(pinfo, -1);
         while (snd_seq_query_next_port(seq, pinfo) >= 0) {
@@ -143,10 +146,23 @@ int es_midi_send_sysex(const char* portNameSubstr, const uint8_t* data, size_t l
         return -1;
     }
 
+    /* Subscribing makes ALSA open the destination's RawMIDI port; without it a
+     * normally idle hardware port receives nothing. */
+    int subErr = snd_seq_connect_to(seq, srcPort, destClient, destPort);
+    if (subErr < 0) {
+        snprintf(g_error, sizeof g_error, "could not subscribe to \"%s\": %s", destName,
+                 snd_strerror(subErr));
+        snd_seq_close(seq);
+        return -1;
+    }
+
     snd_seq_event_t ev;
     snd_seq_ev_clear(&ev);
     snd_seq_ev_set_source(&ev, srcPort);
     snd_seq_ev_set_dest(&ev, destClient, destPort);
+    /* Without this the event targets kernel queue 0, which this client has not
+     * joined, and the kernel rejects it with -EINVAL. */
+    snd_seq_ev_set_direct(&ev);
     snd_seq_ev_set_sysex(&ev, len, (void*)data);
 
     int err = snd_seq_event_output_direct(seq, &ev);
@@ -157,7 +173,6 @@ int es_midi_send_sysex(const char* portNameSubstr, const uint8_t* data, size_t l
         return -1;
     }
 
-    snd_seq_drain_output(seq);
     snd_seq_close(seq);
     return 0;
 }

@@ -84,8 +84,10 @@ ifeq ($(UNAME_S),Darwin)
     TARGET_EXT :=
 endif
 
-# Windows (MinGW)
-ifeq ($(findstring MINGW,$(UNAME_S)),MINGW)
+# Windows (MSYS2/MinGW). MSYS2 shells report <ENV>_NT-10.0, where ENV is
+# MINGW64, UCRT64, CLANG64 or MINGW32.
+WIN_ENVS := $(findstring MINGW,$(UNAME_S))$(findstring UCRT64,$(UNAME_S))$(findstring CLANG64,$(UNAME_S))
+ifneq ($(WIN_ENVS),)
     CXX := g++
     CC := gcc
     PLATFORM_DEFS := -DWIN32 -DBOOTLOADER_HOST -D_WIN32_WINNT=0x0601
@@ -98,6 +100,7 @@ ifeq ($(findstring MINGW,$(UNAME_S)),MINGW)
     BLFWK_OBJS += $(BLFWK_SRC)/hid-windows.o
     TARGET_EXT := .exe
 endif
+ifeq ($(WIN_ENVS),)
 ifeq ($(findstring MSYS,$(UNAME_S)),MSYS)
     CXX := g++
     CC := gcc
@@ -110,6 +113,7 @@ ifeq ($(findstring MSYS,$(UNAME_S)),MSYS)
     MIDI_OBJS := $(SRC_DIR)/midi_win.o
     BLFWK_OBJS += $(BLFWK_SRC)/hid-windows.o
     TARGET_EXT := .exe
+endif
 endif
 
 # Compiler flags
@@ -184,6 +188,9 @@ $(SRC_DIR)/%.o: $(SRC_DIR)/%.cpp
 
 $(SRC_DIR)/%.o: $(SRC_DIR)/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+# The MIDI interface header is included by main.cpp and every backend.
+$(OBJS) $(MIDI_OBJS): $(SRC_DIR)/midi.h
 
 # Ensure patches are applied before compiling library files
 $(BLFWK_SRC)/%.o: $(BLFWK_SRC)/%.cpp | $(PATCH_MARKER)

@@ -101,17 +101,21 @@ int es_midi_send_sysex(const char* portNameSubstr, const uint8_t* data, size_t l
         return -1;
     }
 
-    /* CoreMIDI packets are small; SysEx messages sent by this tool are < 16 bytes. */
-    Byte packetBuf[512];
+    /* A MIDIPacketList requires 4-byte alignment; a plain Byte array only
+     * guarantees 1, so use a union to get correctly aligned storage. */
+    union {
+        MIDIPacketList list;
+        Byte bytes[512];
+    } packetStorage;
     if (len > 256) {
         snprintf(g_error, sizeof g_error, "SysEx message too long for a single packet (%zu bytes)", len);
         MIDIPortDispose(port);
         MIDIClientDispose(client);
         return -1;
     }
-    MIDIPacketList* list = (MIDIPacketList*)packetBuf;
+    MIDIPacketList* list = &packetStorage.list;
     MIDIPacket* packet = MIDIPacketListInit(list);
-    packet = MIDIPacketListAdd(list, sizeof packetBuf, packet, 0, (ByteCount)len, data);
+    packet = MIDIPacketListAdd(list, sizeof packetStorage.bytes, packet, 0, (ByteCount)len, data);
     if (!packet) {
         snprintf(g_error, sizeof g_error, "could not build MIDI packet");
         MIDIPortDispose(port);

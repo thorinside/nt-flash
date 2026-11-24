@@ -5,6 +5,7 @@
 
 #include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <windows.h>
 #include <mmsystem.h>
@@ -24,6 +25,14 @@ static int containsNoCase(const char* haystack, const char* needle) {
         if (i == nl) return 1;
     }
     return 0;
+}
+
+static void setWinError(const char* what, MMRESULT code) {
+    char text[160] = {0};
+    if (midiOutGetErrorTextA(code, text, sizeof text) != MMSYSERR_NOERROR) {
+        snprintf(text, sizeof text, "code %u", (unsigned)code);
+    }
+    snprintf(g_error, sizeof g_error, "%s: %s", what, text);
 }
 
 static void deviceName(UINT id, char* out, size_t n) {
@@ -73,35 +82,70 @@ int es_midi_send_sysex(const char* portNameSubstr, const uint8_t* data, size_t l
     HMIDIOUT handle;
     MMRESULT res = midiOutOpen(&handle, chosen, 0, 0, CALLBACK_NULL);
     if (res != MMSYSERR_NOERROR) {
-        snprintf(g_error, sizeof g_error, "midiOutOpen(\"%s\") failed (%u)", chosenName, (unsigned)res);
+        char what[192];
+        snprintf(what, sizeof what, "midiOutOpen(\"%s\") failed (is another application, e.g. a browser, holding the port?)",
+                 chosenName);
+        setWinError(what, res);
         return -1;
     }
 
-    MIDIHDR hdr;
-    memset(&hdr, 0, sizeof hdr);
-    hdr.lpData = (LPSTR)data;
-    hdr.dwBufferLength = (DWORD)len;
-    hdr.dwBytesRecorded = (DWORD)len;
+    /* volatile: the driver writes dwFlags from another thread. */
+    volatile MIDIHDR* hdr = (volatile MIDIHDR*)calloc(1, sizeof(MIDIHDR));
+    if (!hdr) {
+        snprintf(g_error, sizeof g_error, "out of memory");
+        midiOutClose(handle);
+        return -1;
+    }
+    hdr->lpData = (LPSTR)data;
+    hdr->dwBufferLength = (DWORD)len;
+    hdr->dwBytesRecorded = (DWORD)len;
 
-    res = midiOutPrepareHeader(handle, &hdr, sizeof hdr);
+    res = midiOutPrepareHeader(handle, (LPMIDIHDR)hdr, sizeof(MIDIHDR));
     if (res != MMSYSERR_NOERROR) {
-        snprintf(g_error, sizeof g_error, "midiOutPrepareHeader failed (%u)", (unsigned)res);
+        setWinError("midiOutPrepareHeader failed", res);
+        free((void*)hdr);
         midiOutClose(handle);
         return -1;
     }
 
-    res = midiOutLongMsg(handle, &hdr, sizeof hdr);
+    res = midiOutLongMsg(handle, (LPMIDIHDR)hdr, sizeof(MIDIHDR));
     if (res != MMSYSERR_NOERROR) {
-        snprintf(g_error, sizeof g_error, "midiOutLongMsg to \"%s\" failed (%u)", chosenName, (unsigned)res);
-        midiOutUnprepareHeader(handle, &hdr, sizeof hdr);
+        setWinError("midiOutLongMsg failed", res);
+        midiOutUnprepareHeader(handle, (LPMIDIHDR)hdr, sizeof(MIDIHDR));
+        free((void*)hdr);
         midiOutClose(handle);
         return -1;
     }
 
-    /* Wait for the driver to finish with the buffer before freeing it. */
-    for (int i = 0; i < 200 && !(hdr.dwFlags & MHDR_DONE); i++) Sleep(10);
+    /* Wait for the driver to hand the buffer back before freeing it. */
+    int done = 0;
+    for (int i = 0; i < 200; i++) {
+        if (hdr->dwFlags & MHDR_DONE) {
+            done = 1;
+            break;
+        }
+        Sleep(10);
+    }
 
-    midiOutUnprepareHeader(handle, &hdr, sizeof hdr);
+    int rc = 0;
+    if (!done) {
+        /* The driver still owns the buffer: stop playback and wait for it to be
+         * returned. Reporting success here would free memory the driver may
+         * still write to. */
+        midiOutReset(handle);
+        for (int i = 0; i < 200 && !(hdr->dwFlags & MHDR_DONE); i++) Sleep(10);
+        snprintf(g_error, sizeof g_error, "timed out sending SysEx to \"%s\"", chosenName);
+        rc = -1;
+    }
+
+    if (midiOutUnprepareHeader(handle, (LPMIDIHDR)hdr, sizeof(MIDIHDR)) == MIDIERR_STILLPLAYING) {
+        if (rc == 0) {
+            snprintf(g_error, sizeof g_error, "MIDI driver still holds the SysEx buffer for \"%s\"",
+                     chosenName);
+            rc = -1;
+        }
+    }
+    free((void*)hdr);
     midiOutClose(handle);
-    return 0;
+    return rc;
 }

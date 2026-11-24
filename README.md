@@ -60,6 +60,9 @@ nt-flash --list-midi-ports    # show MIDI ports, e.g. "disting NT"
 If that is not possible (no MIDI port, unusual configuration), use the module
 menu: `Menu > Misc > Enter bootloader mode...`
 
+This needs disting NT firmware 1.16.0 or later, which added the SysEx message for
+entering bootloader mode. With older firmware, use the module menu.
+
 ### Flash from local file
 
 ```bash
