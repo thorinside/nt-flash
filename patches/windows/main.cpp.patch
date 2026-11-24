@@ -1,0 +1,167 @@
+--- a/main.cpp
++++ b/main.cpp
+@@ -42,6 +42,12 @@
+ 
+ #if defined(WIN32)
+ #include <windows.h>
++#include "win_handoff.h"
++#include <memory>
++#include <cfgmgr32.h>
++extern "C" {
++#include <hidsdi.h>
++}
+ #else
+ #include <unistd.h>
+ #include <signal.h>
+@@ -634,7 +640,8 @@
+             delete m_packetizer;
+             m_packetizer = nullptr;
+         }
+-        // Peripheral is owned by packetizer, don't double-delete
++        // Unlike UsbHidPacketizer, SDPUsbHidPacketizer only borrows it.
++        delete m_peripheral;
+         m_peripheral = nullptr;
+     }
+ 
+@@ -646,7 +653,31 @@
+ //------------------------------------------------------------------------------
+ // Bootloader Operations (Flashloader)
+ //------------------------------------------------------------------------------
++
++// Query PnP's list of *present* interfaces, not WinMM or a new HID handle.
++// Enumeration errors (including a changing list) aren't evidence of removal.
++static win_handoff::Presence flashloaderPresence(const std::string& path) {
++    GUID hidClass;
++    HidD_GetHidGuid(&hidClass);
++    ULONG size = 0;
++    if (CM_Get_Device_Interface_List_SizeA(&size, &hidClass, nullptr,
++            CM_GET_DEVICE_INTERFACE_LIST_PRESENT) != CR_SUCCESS || !size)
++        return win_handoff::Presence::unknown;
++    std::vector<char> paths(size);
++    if (CM_Get_Device_Interface_ListA(&hidClass, nullptr, paths.data(), size,
++            CM_GET_DEVICE_INTERFACE_LIST_PRESENT) != CR_SUCCESS)
++        return win_handoff::Presence::unknown;
++    for (const char* p = paths.data(); *p; p += strlen(p) + 1)
++        if (_stricmp(p, path.c_str()) == 0) return win_handoff::Presence::present;
++    return win_handoff::Presence::absent;
++}
+ 
++class FlashloaderTransport : public UsbHidPacketizer {
++public:
++    using UsbHidPacketizer::UsbHidPacketizer;
++    void useResetTimeout() { m_packetTimeoutMs = 500; }
++};
++
+ class BootloaderOperations {
+ public:
+     BootloaderOperations() : m_bootloader(nullptr) {}
+@@ -664,14 +695,19 @@
+         // Try multiple times as device may take time to enumerate
+         for (int attempt = 0; attempt < 5; attempt++) {
+             try {
+-                Peripheral::PeripheralConfigData config;
+-                config.peripheralType = Peripheral::kHostPeripheralType_USB_HID;
+-                config.usbHidVid = BL_VID;
+-                config.usbHidPid = BL_PID;
+-                config.packetTimeoutMs = BL_TIMEOUT_MS;
+-                config.ping = false;
+-
+-                m_bootloader = new Bootloader(config);
++                // Bind, and later observe, the same interface. Do not pick an
++                // arbitrary target when multiple NXP flashloaders are attached.
++                std::unique_ptr<hid_device_info, decltype(&hid_free_enumeration)> interfaces(
++                    hid_enumerate(BL_VID, BL_PID), hid_free_enumeration);
++                if (!interfaces || !interfaces->path) throw std::runtime_error("No flashloader interface");
++                if (interfaces->next) {
++                    logError("Multiple flashloader interfaces. Disconnect other bootloaders first.");
++                    return false;
++                }
++                m_path = interfaces->path;
++                std::unique_ptr<UsbHidPeripheral> port(new UsbHidPeripheral(BL_VID, BL_PID, "", m_path.c_str()));
++                m_bootloader.reset(new FlashloaderTransport(port.get(), BL_TIMEOUT_MS));
++                port.release();  // UsbHidPacketizer now owns it.
+ 
+                 // Test with get-property command
+                 string_vector_t cmdArgs;
+@@ -683,8 +719,7 @@
+                     throw std::runtime_error("Failed to create get-property command");
+                 }
+ 
+-                m_bootloader->inject(*cmd);
+-                m_bootloader->flush();
++                cmd->sendTo(*m_bootloader);
+ 
+                 const uint32_vector_t* response = cmd->getResponseValues();
+                 if (response->size() > 0 && response->at(0) != kStatus_NoResponse) {
+@@ -736,8 +771,7 @@
+             Progress progress(displayProgress, nullptr);
+             cmd->registerProgress(&progress);
+ 
+-            m_bootloader->inject(*cmd);
+-            m_bootloader->flush();
++            cmd->sendTo(*m_bootloader);
+ 
+             const uint32_vector_t* response = cmd->getResponseValues();
+             bool success = true;
+@@ -820,28 +854,22 @@
+         return runCommand(args);
+     }
+ 
+-    bool reset() {
+-        string_vector_t args;
+-        args.push_back("reset");
+-
+-        try {
+-            runCommand(args);
++    win_handoff::Outcome resetAndClose() {
++        if (g_dryRun) {
++            close();
++            return win_handoff::Outcome::unverified;
+         }
+-        catch (...) {
+-            // Expected - device disconnects
+-        }
+-        return true;
++        m_bootloader->useResetTimeout();  // Do not hold HID for the 60s erase/write timeout.
++        return win_handoff::handoff([&] { return flashloaderPresence(m_path); },
++            [&] { return win_handoff::sendReset(*m_bootloader); },
++            [&] { close(); }, [] { Sleep(200); });
+     }
+ 
+-    void close() {
+-        if (m_bootloader) {
+-            delete m_bootloader;
+-            m_bootloader = nullptr;
+-        }
+-    }
++    void close() { m_bootloader.reset(); }
+ 
+ private:
+-    Bootloader* m_bootloader;
++    std::unique_ptr<FlashloaderTransport> m_bootloader;
++    std::string m_path;
+ };
+ 
+ //------------------------------------------------------------------------------
+@@ -1097,11 +1125,16 @@
+ 
+     logInfo("Resetting device...");
+     machineStatus("RESET", 95, "Resetting device");
+-    bl.reset();
+-    bl.close();
+-
+-    logInfo("=== Flash complete! ===");
+-    machineStatus("COMPLETE", 100, "Flash complete");
++    const auto reset = bl.resetAndClose();
++    if (reset == win_handoff::Outcome::failed) {
++        logError("Firmware written, but the reset command failed. If application MIDI is absent, power-cycle the module; do not reflash.");
++        return false;
++    }
++    const char* result = g_dryRun ? "Dry run complete" :
++        reset == win_handoff::Outcome::removed ? "Firmware written; flashloader removed" :
++        "Firmware written; reset unconfirmed. Check application MIDI; power-cycle if absent. Do not reflash.";
++    logInfo("%s", result);
++    machineStatus("COMPLETE", 100, result);
+     return true;
+ }
+ 

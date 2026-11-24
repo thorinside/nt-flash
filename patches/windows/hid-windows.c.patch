@@ -1,0 +1,257 @@
+--- a/hid-windows.c
++++ b/hid-windows.c
+@@ -58,6 +58,7 @@
+ 
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <limits.h>
+ #include "blfwk/hidapi.h"
+ 
+ #ifdef _MSC_VER
+@@ -135,6 +136,9 @@
+     DWORD last_error_num;
+     BOOL read_pending;
+     char *read_buf;
++    BOOL write_pending;
++    unsigned char *write_buf;
++    size_t write_capacity;
+     OVERLAPPED read_ol;
+     OVERLAPPED write_ol;
+ };
+@@ -142,6 +146,7 @@
+ static hid_device *new_hid_device()
+ {
+     hid_device *dev = (hid_device *)calloc(1, sizeof(hid_device));
++    if (!dev) return NULL;
+     dev->device_handle = INVALID_HANDLE_VALUE;
+     dev->blocking = TRUE;
+     dev->output_report_length = 0;
+@@ -151,9 +156,15 @@
+     dev->read_pending = FALSE;
+     dev->read_buf = NULL;
+     memset(&dev->read_ol, 0, sizeof(dev->read_ol));
+-    dev->read_ol.hEvent = CreateEvent(NULL, FALSE, FALSE /*inital state f=nonsignaled*/, NULL);
++    dev->read_ol.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+     memset(&dev->write_ol, 0, sizeof(dev->write_ol));
+-    dev->write_ol.hEvent = CreateEvent(NULL, FALSE, FALSE /*inital state f=nonsignaled*/, NULL);
++    dev->write_ol.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
++    if (!dev->read_ol.hEvent || !dev->write_ol.hEvent) {
++        if (dev->read_ol.hEvent) CloseHandle(dev->read_ol.hEvent);
++        if (dev->write_ol.hEvent) CloseHandle(dev->write_ol.hEvent);
++        free(dev);
++        return NULL;
++    }
+ 
+     return dev;
+ }
+@@ -164,34 +175,20 @@
+     CloseHandle(dev->write_ol.hEvent);
+     CloseHandle(dev->device_handle);
+     LocalFree(dev->last_error_str);
++    free(dev->write_buf);
+     free(dev->read_buf);
+     free(dev);
+ }
+ 
+ static void register_error(hid_device *device, const wchar_t *op)
+ {
+-    //  WCHAR *ptr;
+-    WCHAR *sysMsg, *msg;
++    WCHAR *sysMsg = NULL, *msg = NULL;
+     DWORD err = GetLastError();
+-
+     FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL,
+-                   err, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPWSTR)&sysMsg, 0 /*sz*/, NULL);
+-
+-    /* Get rid of the CR and LF that FormatMessage() sticks at the
+-    end of the message. Thanks Microsoft! */
+-    /*    ptr = sysMsg;
+-        while (*ptr)
+-        {
+-            if (*ptr == '\r')
+-            {
+-                *ptr = 0x0000;
+-                break;
+-            }
+-            ptr++;
+-        }
+-    */
+-    msg = (WCHAR *)LocalAlloc(LMEM_ZEROINIT, (wcslen((LPCWSTR)sysMsg) + wcslen((LPCWSTR)op) + 40) * sizeof(WCHAR));
+-    swprintf((wchar_t *)msg, (size_t)LocalSize(msg), L"%s failed with error %d: %s", op, err, sysMsg);
++                   err, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPWSTR)&sysMsg, 0, NULL);
++    size_t count = wcslen(op) + (sysMsg ? wcslen(sysMsg) : 0) + 48;
++    msg = (WCHAR *)LocalAlloc(LMEM_ZEROINIT, count * sizeof(WCHAR));
++    if (msg) swprintf(msg, count, L"%ls failed with error %lu: %ls", op, err, sysMsg ? sysMsg : L"");
+ 
+     /* Store the message off in the Device entry so that
+     the hid_error() function can pick it up. */
+@@ -581,6 +578,7 @@
+     }
+ 
+     dev = new_hid_device();
++    if (!dev) return NULL;
+ 
+     /* Open a handle to the device */
+     dev->device_handle = open_device(path, FALSE);
+@@ -621,79 +619,60 @@
+     return NULL;
+ }
+ 
++/* Cancellation is asynchronous. Do not reuse or release an OVERLAPPED, its
++ * event, or its buffer until the kernel has completed that particular I/O. */
++static BOOL cancel_and_drain(HANDLE file, OVERLAPPED *io, DWORD *bytes, BOOL *pending)
++{
++    CancelIoEx(file, io); /* ERROR_NOT_FOUND is normal when completion wins. */
++    WaitForSingleObject(io->hEvent, 1000);
++    BOOL ok = GetOverlappedResult(file, io, bytes, FALSE);
++    *pending = !ok && !HasOverlappedIoCompleted(io);
++    return ok;
++}
++
+ int HID_API_EXPORT HID_API_CALL hid_write_timeout(hid_device *dev,
+                                                   const unsigned char *data,
+                                                   size_t length,
+                                                   int milliseconds)
+ {
+-    DWORD bytes_written;
+-    BOOL res;
+-
+-    unsigned char *buf;
+-    dev->write_ol.Offset = 0;
+-    dev->write_ol.OffsetHigh = 0;
+-
+-    /* Make sure the right number of bytes are passed to WriteFile. Windows
+-    expects the number of bytes which are in the _longest_ report (plus
+-    one for the report number) bytes even if the data is a report
+-    which is shorter than that. Windows gives us this value in
+-    caps.OutputReportByteLength. If a user passes in fewer bytes than this,
+-    create a temporary buffer which is the proper size. */
+-    if (length >= dev->output_report_length)
+-    {
+-        /* The user passed the right number of bytes. Use the buffer as-is. */
+-        buf = (unsigned char *)data;
+-    }
+-    else
+-    {
+-        /* Create a temporary buffer and copy the user's data
+-        into it, padding the rest with zeros. */
+-        buf = (unsigned char *)malloc(dev->output_report_length);
+-        memcpy(buf, data, length);
+-        memset(buf + length, 0, dev->output_report_length - length);
+-        length = dev->output_report_length;
++    DWORD bytes = 0;
++    size_t size = length < dev->output_report_length ? dev->output_report_length : length;
++    if (!size || size > INT_MAX || dev->write_pending) return -1;
++    if (size > dev->write_capacity) {
++        unsigned char *buf = (unsigned char *)realloc(dev->write_buf, size);
++        if (!buf) return -1;
++        dev->write_buf = buf;
++        dev->write_capacity = size;
+     }
+-
+-    res = WriteFile(dev->device_handle, buf, length, NULL, &dev->write_ol);
+-
+-    if (!res)
+-    {
+-        if (GetLastError() != ERROR_IO_PENDING)
+-        {
+-            /* WriteFile() failed. Return error. */
+-            CancelIo(dev->device_handle);
++    memcpy(dev->write_buf, data, length);
++    memset(dev->write_buf + length, 0, size - length);
++    ResetEvent(dev->write_ol.hEvent);
++    if (!WriteFile(dev->device_handle, dev->write_buf, (DWORD)size, &bytes, &dev->write_ol)) {
++        if (GetLastError() != ERROR_IO_PENDING) {
+             register_error(dev, L"WriteFile");
+-            bytes_written = -1;
+-            goto end_of_function;
++            return -1;
+         }
+-    }
+-
+-    /* Wait for the write to complete. */
+-    res = WaitForSingleObject(dev->write_ol.hEvent, milliseconds);
+-    if (res != WAIT_OBJECT_0)
+-    {
+-        /* The WaitForSingleObject operation failed. */
+-        CancelIo(dev->device_handle);
+-        register_error(dev, L"WaitForSingleObject");
+-        bytes_written = -1;
+-        goto end_of_function;
+-    }
+-
+-    /* WaitForSingleObject() told us that WriteFile has completed.*/
+-    res = GetOverlappedResult(dev->device_handle, &dev->write_ol, &bytes_written, TRUE /*wait*/);
+-    if (!res)
+-    {
+-        /* The GetOverlappedResult operation failed. */
+-        register_error(dev, L"GetOverlappedResult");
+-        bytes_written = -1;
+-        goto end_of_function;
++        dev->write_pending = TRUE;
++        if (WaitForSingleObject(dev->write_ol.hEvent, milliseconds) != WAIT_OBJECT_0) {
++            if (!cancel_and_drain(dev->device_handle, &dev->write_ol, &bytes, &dev->write_pending)) {
++                register_error(dev, L"WriteFile (cancel)");
++                return -1;
++            }
++        } else {
++            BOOL ok = GetOverlappedResult(dev->device_handle, &dev->write_ol, &bytes, FALSE);
++            dev->write_pending = !ok && !HasOverlappedIoCompleted(&dev->write_ol);
++            if (!ok) {
++                register_error(dev, L"GetOverlappedResult");
++                return -1;
++            }
++        }
+     }
+-
+-end_of_function:
+-    if (buf != data)
+-        free(buf);
+-
+-    return bytes_written;
++    if (bytes != size) {
++        SetLastError(ERROR_WRITE_FAULT);
++        register_error(dev, L"Short HID write");
++        return -1;
++    }
++    return (int)bytes;
+ }
+ 
+ int HID_API_EXPORT HID_API_CALL hid_write(hid_device *dev, const unsigned char *data, size_t length)
+@@ -711,6 +690,7 @@
+         /* Start an Overlapped I/O read. */
+         dev->read_pending = TRUE;
+         memset(dev->read_buf, 0, dev->input_report_length);
++        ResetEvent(dev->read_ol.hEvent);
+         res = ReadFile(dev->device_handle, dev->read_buf, dev->input_report_length, &bytes_read, &dev->read_ol);
+ 
+         if (!res)
+@@ -718,8 +698,7 @@
+             if (GetLastError() != ERROR_IO_PENDING)
+             {
+                 /* ReadFile() has failed.
+-                Clean up and return error. */
+-                CancelIo(dev->device_handle);
++                No read was queued. */
+                 dev->read_pending = FALSE;
+                 goto end_of_function;
+             }
+@@ -845,7 +824,17 @@
+ {
+     if (!dev)
+         return;
+-    CancelIo(dev->device_handle);
++    DWORD ignored;
++    if (dev->write_pending)
++        cancel_and_drain(dev->device_handle, &dev->write_ol, &ignored, &dev->write_pending);
++    if (dev->read_pending)
++        cancel_and_drain(dev->device_handle, &dev->read_ol, &ignored, &dev->read_pending);
++    if (dev->read_pending || dev->write_pending) {
++        /* Broken driver: release the device handle, but let process teardown
++         * reclaim both buffers, events and OVERLAPPEDs, never the caller. */
++        CloseHandle(dev->device_handle);
++        return;
++    }
+     free_hid_device(dev);
+ }
+ 

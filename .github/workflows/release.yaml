@@ -67,7 +67,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libudev-dev
+          sudo apt-get install -y libudev-dev libasound2-dev
 
       - name: Install dependencies (macOS)
         if: matrix.os == 'macos-latest'
@@ -83,6 +83,7 @@ jobs:
           install: >-
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-make
+            git
             zip
 
       - name: Build (macOS - Universal Binary)
@@ -105,6 +106,7 @@ jobs:
         run: |
           mingw32-make clean || true
           mingw32-make
+          mingw32-make check-windows
 
       - name: Smoke test Windows binary
         if: matrix.os == 'windows-latest'
