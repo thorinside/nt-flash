@@ -19,6 +19,9 @@ SRC_DIR := src
 SRCS := $(wildcard $(SRC_DIR)/*.cpp)
 OBJS := $(SRCS:.cpp=.o)
 
+# MIDI backend (used to request bootloader mode over SysEx); one per platform
+MIDI_OBJS := $(SRC_DIR)/midi_none.o
+
 # Embedded libraries
 LIB_MINIZ := lib/miniz/miniz.o lib/miniz/miniz_tdef.o lib/miniz/miniz_tinfl.o lib/miniz/miniz_zip.o
 LIB_CJSON := lib/cJSON/cJSON.o
@@ -62,7 +65,8 @@ ifeq ($(UNAME_S),Linux)
     CXX := g++
     CC := gcc
     PLATFORM_DEFS := -DLINUX -DBOOTLOADER_HOST
-    PLATFORM_LIBS := -ludev -lpthread
+    PLATFORM_LIBS := -ludev -lpthread -lasound
+    MIDI_OBJS := $(SRC_DIR)/midi_linux.o
     BLFWK_OBJS += $(BLFWK_SRC)/hid-linux.o
     TARGET_EXT :=
 endif
@@ -73,7 +77,8 @@ ifeq ($(UNAME_S),Darwin)
     # Use IOKit HID (same as Python SDK)
     MACOS_MIN_VERSION := -mmacosx-version-min=11.0
     PLATFORM_DEFS := -DMACOSX -DBOOTLOADER_HOST $(MACOS_MIN_VERSION)
-    PLATFORM_LIBS := -framework IOKit -framework CoreFoundation -lpthread
+    PLATFORM_LIBS := -framework IOKit -framework CoreFoundation -framework CoreMIDI -lpthread
+    MIDI_OBJS := $(SRC_DIR)/midi_mac.o
     PLATFORM_LDFLAGS := $(MACOS_MIN_VERSION)
     BLFWK_OBJS += $(BLFWK_SRC)/hid-mac.o
     TARGET_EXT :=
@@ -88,7 +93,8 @@ ifeq ($(findstring MINGW,$(UNAME_S)),MINGW)
     PLATFORM_CXX_EXTRA := -include cstring
     # -static links runtime statically so DLLs aren't needed
     PLATFORM_LDFLAGS := -static
-    PLATFORM_LIBS := -lsetupapi -lhid -lws2_32
+    PLATFORM_LIBS := -lsetupapi -lhid -lws2_32 -lwinmm
+    MIDI_OBJS := $(SRC_DIR)/midi_win.o
     BLFWK_OBJS += $(BLFWK_SRC)/hid-windows.o
     TARGET_EXT := .exe
 endif
@@ -100,7 +106,8 @@ ifeq ($(findstring MSYS,$(UNAME_S)),MSYS)
     PLATFORM_CXX_EXTRA := -include cstring
     # -static links runtime statically so DLLs aren't needed
     PLATFORM_LDFLAGS := -static
-    PLATFORM_LIBS := -lsetupapi -lhid -lws2_32
+    PLATFORM_LIBS := -lsetupapi -lhid -lws2_32 -lwinmm
+    MIDI_OBJS := $(SRC_DIR)/midi_win.o
     BLFWK_OBJS += $(BLFWK_SRC)/hid-windows.o
     TARGET_EXT := .exe
 endif
@@ -142,7 +149,7 @@ universal: clean
 	file $(TARGET)
 
 clean-objs:
-	rm -f $(OBJS) $(BLFWK_OBJS) $(LIB_MINIZ) $(LIB_CJSON)
+	rm -f $(OBJS) $(BLFWK_OBJS) $(LIB_MINIZ) $(LIB_CJSON) $(MIDI_OBJS)
 	rm -f $(BLFWK_DIR)/sdphost.o $(BLFWK_DIR)/proj/blhost/src/blhost.o
 endif
 
@@ -159,7 +166,7 @@ endif
 	@touch $@
 
 # Build the unified tool
-$(TARGET)$(TARGET_EXT): $(OBJS) $(BLFWK_OBJS) $(LIB_MINIZ) $(LIB_CJSON)
+$(TARGET)$(TARGET_EXT): $(OBJS) $(BLFWK_OBJS) $(LIB_MINIZ) $(LIB_CJSON) $(MIDI_OBJS)
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $^ $(PLATFORM_LIBS)
 
 # Build individual blhost/sdphost tools (for testing)
@@ -174,6 +181,9 @@ sdphost: $(BLFWK_OBJS) $(BLFWK_DIR)/sdphost.o
 # Compile rules
 $(SRC_DIR)/%.o: $(SRC_DIR)/%.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+$(SRC_DIR)/%.o: $(SRC_DIR)/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 # Ensure patches are applied before compiling library files
 $(BLFWK_SRC)/%.o: $(BLFWK_SRC)/%.cpp | $(PATCH_MARKER)
@@ -199,7 +209,7 @@ lib/cJSON/cJSON.o: lib/cJSON/cJSON.c
 
 clean:
 	rm -f $(TARGET) $(TARGET).exe blhost sdphost blhost.exe sdphost.exe
-	rm -f $(OBJS) $(BLFWK_OBJS) $(LIB_MINIZ) $(LIB_CJSON)
+	rm -f $(OBJS) $(BLFWK_OBJS) $(LIB_MINIZ) $(LIB_CJSON) $(MIDI_OBJS)
 	rm -f $(BLFWK_DIR)/sdphost.o $(BLFWK_DIR)/proj/blhost/src/blhost.o
 	rm -f $(PATCH_MARKER)
 

@@ -29,6 +29,9 @@
 #include "blfwk/Peripheral.h"
 #include "hidapi.h"
 
+// Minimal MIDI SysEx output (used to request bootloader mode)
+#include "midi.h"
+
 // Embedded libraries
 #include "miniz.h"
 #include "miniz_zip.h"
@@ -70,6 +73,15 @@ const uint32_t FLEXSPI_NOR_CONFIG = 0xC0000008;
 const uint32_t FCB_CONFIG = 0xF000000F;
 const uint32_t MEMORY_ID_FLEXSPI_NOR = 9;
 
+// MIDI SysEx: reboot into bootloader mode
+//   F0 00 21 27 6D <sysExId> 7F 7F F7
+// (Expert Sleepers manufacturer ID, 0x6D = disting NT, 0x7F 0x7F = reboot to bootloader)
+const uint8_t SYSEX_BOOTLOADER_MSG[] = {0xF0, 0x00, 0x21, 0x27, 0x6D, 0x00, 0x7F, 0x7F, 0xF7};
+const size_t SYSEX_BOOTLOADER_SYSEX_ID_OFFSET = 5;
+const char* DEFAULT_MIDI_PORT = "disting NT";
+const int DEFAULT_SYSEX_ID = 0;
+const uint32_t BOOTLOADER_WAIT_MS = 15000;  // Time for the module to re-enumerate in SDP mode
+
 // Timeouts
 const uint32_t SDP_TIMEOUT_MS = 5000;
 const uint32_t BL_TIMEOUT_MS = 60000;  // Long timeout for flash operations
@@ -85,6 +97,13 @@ const char* FIRMWARE_UPDATES_URL = "https://www.expert-sleepers.co.uk/distingNTf
 static bool g_verbose = false;
 static bool g_dryRun = false;
 static bool g_machineOutput = false;
+
+// MIDI bootloader-entry options
+static std::string g_midiPort = DEFAULT_MIDI_PORT;
+static int g_sysexId = DEFAULT_SYSEX_ID;
+static bool g_autoBootloader = true;        // Try MIDI entry when SDP is not found
+static bool g_enterBootloaderOnly = false;  // --enter-bootloader: do it and exit
+static bool g_listMidiPorts = false;
 
 //------------------------------------------------------------------------------
 // Logging
@@ -689,7 +708,9 @@ public:
 #endif
         }
 
-        logError("Failed to connect to bootloader");
+        // Callers decide how to report this: connecting is also used as a probe
+        // (is the device already in flashloader mode?), where failure is normal.
+        logVerbose("Bootloader not found after retries");
         return false;
     }
 
@@ -824,6 +845,96 @@ private:
 };
 
 //------------------------------------------------------------------------------
+// Bootloader Entry (MIDI SysEx)
+//------------------------------------------------------------------------------
+
+static void sleepMs(uint32_t ms) {
+#ifdef WIN32
+    Sleep(ms);
+#else
+    usleep(ms * 1000);
+#endif
+}
+
+// Is the module already enumerating as the NXP ROM bootloader?
+// Also resets the HID enumeration cache so a re-enumerated device is seen.
+static bool sdpDevicePresent() {
+    hid_exit();
+    hid_device_info* list = hid_enumerate(SDP_VID, SDP_PID);
+    bool found = list != nullptr;
+    if (list) {
+        hid_free_enumeration(list);
+    }
+    return found;
+}
+
+static bool flashloaderPresent() {
+    hid_exit();
+    hid_device_info* list = hid_enumerate(BL_VID, BL_PID);
+    bool found = list != nullptr;
+    if (list) {
+        hid_free_enumeration(list);
+    }
+    return found;
+}
+
+// Send the "reboot into bootloader mode" SysEx message, optionally waiting for
+// the module to come back as the SDP (NXP ROM) device.
+static bool requestBootloaderMode(bool waitForEnumeration) {
+    uint8_t msg[sizeof(SYSEX_BOOTLOADER_MSG)];
+    memcpy(msg, SYSEX_BOOTLOADER_MSG, sizeof(SYSEX_BOOTLOADER_MSG));
+    msg[SYSEX_BOOTLOADER_SYSEX_ID_OFFSET] = (uint8_t)(g_sysexId & 0x7F);
+
+    if (sdpDevicePresent() || flashloaderPresent()) {
+        logVerbose("Device is already in bootloader mode");
+        return true;
+    }
+
+    if (g_dryRun) {
+        logVerbose("[DRY RUN] Would send SysEx to MIDI port \"%s\": ", g_midiPort.c_str());
+        if (g_verbose) {
+            printf("  [DRY RUN]  ");
+            for (size_t i = 0; i < sizeof(msg); i++) {
+                printf("%02X ", msg[i]);
+            }
+            printf("\n");
+            fflush(stdout);
+        }
+        logVerbose("[DRY RUN] Would wait up to %u s for the device to re-enumerate", BOOTLOADER_WAIT_MS / 1000);
+        return true;
+    }
+
+    if (es_midi_send_sysex(g_midiPort.c_str(), msg, sizeof(msg)) != 0) {
+        const char* err = es_midi_error();
+        logError("Could not request bootloader mode: %s", err ? err : "unknown MIDI error");
+        logInfo("MIDI backend: %s", es_midi_backend());
+        logInfo("List available ports with: %s --list-midi-ports", TOOL_NAME);
+        return false;
+    }
+
+    logInfo("Requested bootloader mode via MIDI SysEx (%s, port \"%s\")", es_midi_backend(),
+            g_midiPort.c_str());
+
+    if (!waitForEnumeration) {
+        return true;
+    }
+
+    logInfo("Waiting for disting NT to re-enumerate in bootloader mode...");
+    uint32_t waited = 0;
+    while (waited < BOOTLOADER_WAIT_MS) {
+        sleepMs(200);
+        waited += 200;
+        if (sdpDevicePresent()) {
+            logVerbose("Device re-enumerated after %u ms", waited);
+            return true;
+        }
+    }
+
+    logError("Device did not appear in bootloader mode after %u s", BOOTLOADER_WAIT_MS / 1000);
+    return false;
+}
+
+//------------------------------------------------------------------------------
 // Flash Orchestration
 //------------------------------------------------------------------------------
 
@@ -842,7 +953,9 @@ bool flashFirmware(FirmwarePackage* pkg, bool skipSdp = false) {
 
         logInfo("[1/7] Connecting to SDP bootloader...");
         machineStatus("SDP_CONNECT", 5, "Connecting to SDP bootloader");
-        if (!sdp.connect()) {
+        bool sdpConnected = sdp.connect();
+
+        if (!sdpConnected) {
             // Check if device is already in flashloader mode
             BootloaderOperations blCheck;
             machineStatus("BL_CHECK", 10, "Checking for flashloader mode");
@@ -851,12 +964,24 @@ bool flashFirmware(FirmwarePackage* pkg, bool skipSdp = false) {
                 machineStatus("BL_FOUND", 15, "Device already in flashloader mode");
                 blCheck.close();
                 skipSdp = true;
-            } else {
-                logError("Device not found in SDP mode or flashloader mode");
-                logInfo("Make sure disting NT is in bootloader mode:");
-                logInfo("  Menu > Misc > Enter bootloader mode...");
-                return false;
             }
+            else if (g_autoBootloader) {
+                // Not in SDP mode - ask the running firmware to reboot into the bootloader.
+                logInfo("Device not in bootloader mode, requesting it over MIDI...");
+                machineStatus("BOOTLOADER", 2, "Requesting bootloader mode via MIDI SysEx");
+                if (requestBootloaderMode(true)) {
+                    machineStatus("SDP_CONNECT", 5, "Connecting to SDP bootloader");
+                    sdpConnected = sdp.connect();
+                }
+            }
+        }
+
+        if (!sdpConnected && !skipSdp) {
+            logError("Device not found in SDP mode or flashloader mode");
+            logInfo("Make sure disting NT is connected and powered:");
+            logInfo("  - let this tool request bootloader mode (default), or");
+            logInfo("  - use the menu: Menu > Misc > Enter bootloader mode...");
+            return false;
         }
 
         if (!skipSdp) {
@@ -959,15 +1084,21 @@ void printUsage() {
     printf("  %s --latest                    Download and flash latest version\n", TOOL_NAME);
     printf("  %s --url <url>                 Download and flash from URL\n", TOOL_NAME);
     printf("  %s --list                      List available firmware versions\n", TOOL_NAME);
+    printf("  %s --enter-bootloader          Put disting NT in bootloader mode and exit\n", TOOL_NAME);
+    printf("  %s --list-midi-ports           List MIDI output ports\n", TOOL_NAME);
     printf("\n");
     printf("Options:\n");
     printf("  -v, --verbose                  Show detailed output\n");
     printf("  -n, --dry-run                  Validate without flashing\n");
     printf("  -m, --machine                  Machine-readable output for tool integration\n");
+    printf("      --midi-port <name>         MIDI port to send bootloader request to\n");
+    printf("                                 (default: \"%s\")\n", DEFAULT_MIDI_PORT);
+    printf("      --sysex-id <0-127>         SysEx device ID of the module (default: %d)\n", DEFAULT_SYSEX_ID);
+    printf("      --no-auto-bootloader       Never enter bootloader mode automatically\n");
     printf("  -h, --help                     Show this help\n");
     printf("\n");
-    printf("Before flashing, put disting NT in bootloader mode:\n");
-    printf("  Menu > Misc > Enter bootloader mode...\n");
+    printf("If disting NT is running normally, this tool asks it to reboot into\n");
+    printf("bootloader mode over MIDI SysEx (alternative: Menu > Misc > Enter bootloader mode).\n");
 }
 
 void printVersionInfo() {
@@ -1016,6 +1147,26 @@ int main(int argc, char* argv[]) {
         else if (arg == "--list") {
             listVersions = true;
         }
+        else if (arg == "--list-midi-ports") {
+            g_listMidiPorts = true;
+        }
+        else if (arg == "--enter-bootloader" || arg == "--bootloader") {
+            g_enterBootloaderOnly = true;
+        }
+        else if (arg == "--midi-port" && i + 1 < argc) {
+            g_midiPort = argv[++i];
+        }
+        else if (arg == "--sysex-id" && i + 1 < argc) {
+            int id = atoi(argv[++i]);
+            if (id < 0 || id > 127) {
+                logError("--sysex-id must be between 0 and 127");
+                return 1;
+            }
+            g_sysexId = id;
+        }
+        else if (arg == "--no-auto-bootloader") {
+            g_autoBootloader = false;
+        }
         else if (arg == "--latest") {
             useLatest = true;
         }
@@ -1032,6 +1183,52 @@ int main(int argc, char* argv[]) {
             logError("Unknown option: %s", arg.c_str());
             return 1;
         }
+    }
+
+    // Handle --list-midi-ports
+    if (g_listMidiPorts) {
+        if (!g_machineOutput) {
+            printf("MIDI backend: %s\n", es_midi_backend());
+        }
+        char names[64 * ES_MIDI_PORT_NAME_MAX];
+        int count = es_midi_list_outputs(names, 64);
+        if (count < 0) {
+            const char* err = es_midi_error();
+            logError("Could not list MIDI ports: %s", err ? err : "unknown error");
+            return 1;
+        }
+        if (count == 0) {
+            logInfo("No MIDI output ports found");
+            return 0;
+        }
+        for (int i = 0; i < count; i++) {
+            const char* name = &names[(size_t)i * ES_MIDI_PORT_NAME_MAX];
+            if (g_machineOutput) {
+                printf("PORT:%s\n", name);
+            } else {
+                printf("  [%d] %s\n", i, name);
+            }
+        }
+        fflush(stdout);
+        return 0;
+    }
+
+    // Handle --enter-bootloader (no firmware package needed)
+    if (g_enterBootloaderOnly) {
+        if (g_dryRun) {
+            logInfo("[DRY RUN MODE - No MIDI message will be sent]");
+        }
+        machineStatus("BOOTLOADER", 0, "Requesting bootloader mode via MIDI SysEx");
+        if (!requestBootloaderMode(true)) {
+            return 1;
+        }
+        if (g_dryRun) {
+            logInfo("Would leave disting NT in bootloader mode");
+        } else {
+            logInfo("disting NT is in bootloader mode");
+        }
+        machineStatus("COMPLETE", 100, "Bootloader mode");
+        return 0;
     }
 
     // Handle --list

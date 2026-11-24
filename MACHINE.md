@@ -39,6 +39,14 @@ ERROR:<MESSAGE>
 
 Indicates a fatal error. The process will exit with a non-zero code.
 
+### PORT Messages
+
+```
+PORT:<NAME>
+```
+
+Emitted by `--list-midi-ports` in machine mode, one line per MIDI output port.
+
 ## Stage Identifiers
 
 | Stage | Percent | Description |
@@ -46,6 +54,7 @@ Indicates a fatal error. The process will exit with a non-zero code.
 | `DOWNLOAD` | 0 | Downloading firmware from URL |
 | `LOAD` | 0 | Loading firmware package from ZIP |
 | `START` | 0 | Flash process starting |
+| `BOOTLOADER` | 2 | Requesting bootloader mode via MIDI SysEx |
 | `SDP_CONNECT` | 5 | Connecting to SDP bootloader (ROM) |
 | `BL_CHECK` | 10 | Checking if already in flashloader mode |
 | `BL_FOUND` | 15 | Device already in flashloader mode |
@@ -66,6 +75,9 @@ Successful flash:
 ```
 STATUS:LOAD:0:Loading firmware package
 STATUS:START:0:Starting disting NT flash
+STATUS:SDP_CONNECT:5:Connecting to SDP bootloader
+STATUS:BL_CHECK:10:Checking for flashloader mode
+STATUS:BOOTLOADER:2:Requesting bootloader mode via MIDI SysEx
 STATUS:SDP_CONNECT:5:Connecting to SDP bootloader
 STATUS:SDP_UPLOAD:15:Uploading flashloader to RAM
 PROGRESS:SDP_UPLOAD:25:Segment 1/4
@@ -91,6 +103,9 @@ Error case:
 ```
 STATUS:LOAD:0:Loading firmware package
 STATUS:START:0:Starting disting NT flash
+STATUS:SDP_CONNECT:5:Connecting to SDP bootloader
+STATUS:BL_CHECK:10:Checking for flashloader mode
+STATUS:BOOTLOADER:2:Requesting bootloader mode via MIDI SysEx
 STATUS:SDP_CONNECT:5:Connecting to SDP bootloader
 ERROR:Device not found in SDP mode or flashloader mode
 ```
