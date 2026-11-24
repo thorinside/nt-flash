@@ -25,7 +25,7 @@ sudo apt-get install libudev-dev libasound2-dev
 
 **Windows (MinGW-w64):**
 - Install MinGW-w64 from https://www.mingw-w64.org/
-- Ensure `gcc` and `make` are in your PATH
+- Ensure `gcc`, `make`, and `git` are in the build shell's PATH (on MSYS2, `pacman -S git`).
 
 ### Build
 

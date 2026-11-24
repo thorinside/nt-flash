@@ -83,6 +83,7 @@ jobs:
           install: >-
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-make
+            git
             zip
 
       - name: Build (macOS - Universal Binary)
